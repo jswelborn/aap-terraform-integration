@@ -1,0 +1,35 @@
+---
+- name: Process Terraform post-apply and launch bootstrap
+  hosts: localhost
+  gather_facts: false
+
+  tasks:
+    - name: Get JSON plan information by run ID
+      hashicorp.terraform.view_plan:
+        run_id: "{{ run_id }}"
+        tf_token: "{{ hcpterraform_api_token }}"
+        output_format: json
+      register: planresults
+      until: planresults.json_output.complete
+      retries: 30
+      delay: 10
+
+    - name: Get before and after VM values
+      ansible.builtin.set_fact:
+        terraformbefore: "{{ planresults.json_output.output_changes.vm_name_terraformvms.before | default([]) }}"
+        terraformafter: "{{ planresults.json_output.output_changes.vm_name_terraformvms.after | default([]) }}"
+
+    - name: Determine newly created VMs
+      ansible.builtin.set_fact:
+        vmstoadd: "{{ terraformafter | difference(terraformbefore) }}"
+
+    - name: Launch Linux bootstrap workflow
+      ansible.controller.workflow_launch:
+        workflow_template: "linux-bootstrap"
+        limit: "{{ vmstoadd | join(',') }}"
+        extra_vars:
+          vm_name: "{{ vmstoadd | join(',') }}"
+          cloud_provider: "azure"
+          operating_system: "linux"
+        wait: true
+      when: vmstoadd | length > 0

@@ -1,0 +1,4 @@
+---
+collections:
+  - name: hashicorp.terraform
+  - name: ansible.controller
