@@ -1,5 +1,5 @@
 ---
-- name: Process Terraform post-apply and launch bootstrap
+- name: Process Terraform post-apply and launch Linux bootstrap
   hosts: localhost
   gather_facts: false
 
@@ -14,7 +14,7 @@
       retries: 30
       delay: 10
 
-    - name: Get before and after VM values
+    - name: Get before and after VM output values
       ansible.builtin.set_fact:
         terraformbefore: "{{ planresults.json_output.output_changes.vm_name_terraformvms.before | default([]) }}"
         terraformafter: "{{ planresults.json_output.output_changes.vm_name_terraformvms.after | default([]) }}"

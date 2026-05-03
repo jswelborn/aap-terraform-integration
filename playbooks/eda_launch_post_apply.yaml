@@ -5,12 +5,12 @@
 
   vars:
     aap_controller_url: "https://platform.cus-xpgr22.aws.ansiblecloud.redhat.com"
-    job_template_id: 48
+    post_apply_job_template_id: 54
 
   tasks:
-    - name: Launch job template via API
+    - name: Launch Terraform Cloud VM Post Apply job template
       ansible.builtin.uri:
-        url: "{{ aap_controller_url }}/api/controller/v2/job_templates/{{ job_template_id }}/launch/"
+        url: "{{ aap_controller_url }}/api/controller/v2/job_templates/{{ post_apply_job_template_id }}/launch/"
         method: POST
         headers:
           Authorization: "Bearer {{ AAP_TOKEN }}"

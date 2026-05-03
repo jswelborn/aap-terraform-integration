@@ -4,7 +4,7 @@
   execution_strategy: parallel
 
   sources:
-    - name: Terraform webhook
+    - name: Listen for Terraform webhook
       eda.builtin.webhook:
         host: 0.0.0.0
         port: 5010
@@ -15,5 +15,3 @@
       action:
         run_playbook:
           name: playbooks/eda_launch_post_apply.yaml
-          job_args:
-            inventory: "Local"
