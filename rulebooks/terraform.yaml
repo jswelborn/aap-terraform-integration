@@ -15,3 +15,4 @@
       action:
         run_playbook:
           name: playbooks/eda_launch_post_apply.yaml
+          inventory: "Local"
