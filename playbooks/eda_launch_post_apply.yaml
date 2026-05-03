@@ -2,15 +2,16 @@
 - name: Launch Terraform Cloud VM Post Apply job
   hosts: localhost
   gather_facts: false
+  connection: local
 
   vars:
     aap_controller_url: "https://platform.cus-xpgr22.aws.ansiblecloud.redhat.com"
-    post_apply_job_template_id: 54
+    job_template_id: 54
 
   tasks:
-    - name: Launch Terraform Cloud VM Post Apply job template
+    - name: Launch job template via API
       ansible.builtin.uri:
-        url: "{{ aap_controller_url }}/api/controller/v2/job_templates/{{ post_apply_job_template_id }}/launch/"
+        url: "{{ aap_controller_url }}/api/controller/v2/job_templates/{{ job_template_id }}/launch/"
         method: POST
         headers:
           Authorization: "Bearer {{ AAP_TOKEN }}"
@@ -18,8 +19,8 @@
         body_format: json
         body:
           extra_vars:
-            plan_json_api_url: "{{ ansible_eda.event.payload.plan_json_api_url }}"
-            task_result_callback_url: "{{ ansible_eda.event.payload.task_result_callback_url }}"
-            access_token: "{{ ansible_eda.event.payload.access_token }}"
-            run_id: "{{ ansible_eda.event.payload.run_id }}"
+            plan_json_api_url: "{{ event_payload.plan_json_api_url }}"
+            task_result_callback_url: "{{ event_payload.task_result_callback_url }}"
+            access_token: "{{ event_payload.access_token }}"
+            run_id: "{{ event_payload.run_id }}"
         status_code: 201
