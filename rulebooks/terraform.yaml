@@ -16,6 +16,8 @@
         run_job_template:
           name: "Terraform Cloud VM Post Apply"
           organization: "Default"
+          controller_host: "https://platform.cus-xpgr22.aws.ansiblecloud.redhat.com"
+          controller_oauthtoken: "{{ AAP_TOKEN }}"
           job_args:
             extra_vars:
               plan_json_api_url: "{{ event.payload.plan_json_api_url }}"
