@@ -6,7 +6,7 @@
   tasks:
     - name: Get JSON plan information by run ID
       hashicorp.terraform.view_plan:
-        run_id: "{{ run_id }}"
+        run_id: "{{ event_payload.run_id }}"
         tf_token: "{{ hcpterraform_api_token }}"
         output_format: json
       register: planresults

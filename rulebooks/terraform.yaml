@@ -1,10 +1,11 @@
+---
 - name: Listen for Terraform events
   hosts: all
   execution_strategy: parallel
 
   sources:
     - name: Terraform webhook
-      ansible.eda.webhook:
+      eda.builtin.webhook:
         host: 0.0.0.0
         port: 5010
 
@@ -12,7 +13,9 @@
     - name: Post Terraform Apply
       condition: event.payload.stage == "post_apply"
       action:
-        run_playbook:
-          name: playbooks/eda_launch_post_apply.yaml
-          extra_vars:
-            event_payload: "{{ event.payload }}"
+        run_job_template:
+          name: "Terraform Cloud VM Post Apply"
+          organization: "Default"
+          job_args:
+            extra_vars:
+              event_payload: "{{ event.payload }}"
