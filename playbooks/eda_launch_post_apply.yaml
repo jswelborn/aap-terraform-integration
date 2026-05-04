@@ -16,6 +16,7 @@
         headers:
           Authorization: "Bearer {{ AAP_TOKEN }}"
           Content-Type: "application/json"
+          Accept: "application/json"
         body_format: json
         body:
           extra_vars:
@@ -23,7 +24,9 @@
             task_result_callback_url: "{{ event_payload.task_result_callback_url }}"
             access_token: "{{ event_payload.access_token }}"
             run_id: "{{ event_payload.run_id }}"
-        status_code: 201
+        status_code:
+          - 201
+          - 202
         return_content: true
       register: launch_result
 
