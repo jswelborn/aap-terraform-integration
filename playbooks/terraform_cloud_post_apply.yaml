@@ -25,7 +25,7 @@
 
     - name: Launch Linux bootstrap workflow
       ansible.controller.workflow_launch:
-        workflow_template: "linux-bootstrap"
+        workflow_template: "Linux-bootstrap"
         limit: "{{ vmstoadd | join(',') }}"
         extra_vars:
           vm_name: "{{ vmstoadd | join(',') }}"
