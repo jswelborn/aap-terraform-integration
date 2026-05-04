@@ -24,3 +24,9 @@
             access_token: "{{ event_payload.access_token }}"
             run_id: "{{ event_payload.run_id }}"
         status_code: 201
+        return_content: true
+      register: launch_result
+
+    - name: Show launch response
+      ansible.builtin.debug:
+        var: launch_result.json
