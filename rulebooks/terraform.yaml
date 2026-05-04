@@ -10,7 +10,16 @@
         port: 5010
 
   rules:
-    - name: Debug Terraform event
-      condition: true
+    - name: Post Terraform Apply
+      condition: event.payload.notifications[0].trigger == "run:completed" and event.payload.notifications[0].run_status == "applied"
       action:
-        debug:
+        run_job_template:
+          name: "Terraform Cloud VM Post Apply"
+          organization: "Default"
+          job_args:
+            extra_vars:
+              run_id: "{{ event.payload.run_id }}"
+              run_url: "{{ event.payload.run_url }}"
+              workspace_id: "{{ event.payload.workspace_id }}"
+              workspace_name: "{{ event.payload.workspace_name }}"
+              organization_name: "{{ event.payload.organization_name }}"
