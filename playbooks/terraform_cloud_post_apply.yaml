@@ -1,5 +1,5 @@
 ---
-- name: Process Terraform post-apply and launch Linux bootstrap
+- name: Process Terraform post-apply and launch bootstrap workflows
   hosts: localhost
   gather_facts: false
 
@@ -14,22 +14,46 @@
       retries: 30
       delay: 10
 
-    - name: Get before and after VM output values
+    - name: Find newly created Azure Linux VMs
       ansible.builtin.set_fact:
-        terraformbefore: "{{ planresults.json_output.output_changes.vm_name_terraformvms.before | default([]) }}"
-        terraformafter: "{{ planresults.json_output.output_changes.vm_name_terraformvms.after | default([]) }}"
+        azure_linux_vms: >-
+          {{
+            planresults.json_output.resource_changes
+            | selectattr('type', 'equalto', 'azurerm_linux_virtual_machine')
+            | selectattr('change.actions', 'contains', 'create')
+            | map(attribute='change.after.name')
+            | list
+          }}
 
-    - name: Determine newly created VMs
+    - name: Find newly created Azure Windows VMs
       ansible.builtin.set_fact:
-        vmstoadd: "{{ terraformafter | difference(terraformbefore) }}"
+        azure_windows_vms: >-
+          {{
+            planresults.json_output.resource_changes
+            | selectattr('type', 'equalto', 'azurerm_windows_virtual_machine')
+            | selectattr('change.actions', 'contains', 'create')
+            | map(attribute='change.after.name')
+            | list
+          }}
 
     - name: Launch Linux bootstrap workflow
       ansible.controller.workflow_launch:
         workflow_template: "Linux-bootstrap"
-        limit: "{{ vmstoadd | join(',') }}"
+        limit: "{{ azure_linux_vms | join(',') }}"
         extra_vars:
-          vm_name: "{{ vmstoadd | join(',') }}"
+          vm_name: "{{ azure_linux_vms | join(',') }}"
           cloud_provider: "azure"
           operating_system: "linux"
         wait: true
-      when: vmstoadd | length > 0
+      when: azure_linux_vms | length > 0
+
+    - name: Launch Windows bootstrap workflow
+      ansible.controller.workflow_launch:
+        workflow_template: "Windows-bootstrap"
+        limit: "{{ azure_windows_vms | join(',') }}"
+        extra_vars:
+          vm_name: "{{ azure_windows_vms | join(',') }}"
+          cloud_provider: "azure"
+          operating_system: "windows"
+        wait: true
+      when: azure_windows_vms | length > 0
