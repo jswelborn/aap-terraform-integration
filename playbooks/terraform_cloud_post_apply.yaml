@@ -14,29 +14,61 @@
       retries: 30
       delay: 10
 
+    - name: Initialize VM routing lists
+      ansible.builtin.set_fact:
+        azure_linux_vms: []
+        azure_windows_vms: []
+        aws_linux_instances: []
+        aws_windows_instances: []
+
     - name: Find newly created Azure Linux VMs
       ansible.builtin.set_fact:
-        azure_linux_vms: >-
-          {{
-            planresults.json_output.resource_changes
-            | selectattr('type', 'equalto', 'azurerm_linux_virtual_machine')
-            | selectattr('change.actions', 'contains', 'create')
-            | map(attribute='change.after.name')
-            | list
-          }}
+        azure_linux_vms: "{{ azure_linux_vms + [item.change.after.name] }}"
+      loop: "{{ planresults.json_output.resource_changes }}"
+      when:
+        - item.type == "azurerm_linux_virtual_machine"
+        - "'create' in item.change.actions"
+        - item.change.after.name is defined
 
     - name: Find newly created Azure Windows VMs
       ansible.builtin.set_fact:
-        azure_windows_vms: >-
-          {{
-            planresults.json_output.resource_changes
-            | selectattr('type', 'equalto', 'azurerm_windows_virtual_machine')
-            | selectattr('change.actions', 'contains', 'create')
-            | map(attribute='change.after.name')
-            | list
-          }}
+        azure_windows_vms: "{{ azure_windows_vms + [item.change.after.name] }}"
+      loop: "{{ planresults.json_output.resource_changes }}"
+      when:
+        - item.type == "azurerm_windows_virtual_machine"
+        - "'create' in item.change.actions"
+        - item.change.after.name is defined
 
-    - name: Launch Linux bootstrap workflow
+    - name: Find newly created AWS Windows instances
+      ansible.builtin.set_fact:
+        aws_windows_instances: "{{ aws_windows_instances + [item.change.after.tags.Name] }}"
+      loop: "{{ planresults.json_output.resource_changes }}"
+      when:
+        - item.type == "aws_instance"
+        - "'create' in item.change.actions"
+        - item.change.after.tags.Name is defined
+        - item.change.after.platform is defined
+        - item.change.after.platform | lower == "windows"
+
+    - name: Find newly created AWS Linux instances
+      ansible.builtin.set_fact:
+        aws_linux_instances: "{{ aws_linux_instances + [item.change.after.tags.Name] }}"
+      loop: "{{ planresults.json_output.resource_changes }}"
+      when:
+        - item.type == "aws_instance"
+        - "'create' in item.change.actions"
+        - item.change.after.tags.Name is defined
+        - item.change.after.platform is not defined or item.change.after.platform | default('') | lower != "windows"
+
+    - name: Show routing results
+      ansible.builtin.debug:
+        msg:
+          azure_linux_vms: "{{ azure_linux_vms }}"
+          azure_windows_vms: "{{ azure_windows_vms }}"
+          aws_linux_instances: "{{ aws_linux_instances }}"
+          aws_windows_instances: "{{ aws_windows_instances }}"
+
+    - name: Launch Azure Linux bootstrap workflow
       ansible.controller.workflow_launch:
         workflow_template: "Linux-bootstrap"
         limit: "{{ azure_linux_vms | join(',') }}"
@@ -47,7 +79,7 @@
         wait: true
       when: azure_linux_vms | length > 0
 
-    - name: Launch Windows bootstrap workflow
+    - name: Launch Azure Windows bootstrap workflow
       ansible.controller.workflow_launch:
         workflow_template: "Windows-bootstrap"
         limit: "{{ azure_windows_vms | join(',') }}"
@@ -57,3 +89,25 @@
           operating_system: "windows"
         wait: true
       when: azure_windows_vms | length > 0
+
+    - name: Launch AWS Linux bootstrap workflow
+      ansible.controller.workflow_launch:
+        workflow_template: "Linux-bootstrap"
+        limit: "{{ aws_linux_instances | join(',') }}"
+        extra_vars:
+          vm_name: "{{ aws_linux_instances | join(',') }}"
+          cloud_provider: "aws"
+          operating_system: "linux"
+        wait: true
+      when: aws_linux_instances | length > 0
+
+    - name: Launch AWS Windows bootstrap workflow
+      ansible.controller.workflow_launch:
+        workflow_template: "Windows-bootstrap"
+        limit: "{{ aws_windows_instances | join(',') }}"
+        extra_vars:
+          vm_name: "{{ aws_windows_instances | join(',') }}"
+          cloud_provider: "aws"
+          operating_system: "windows"
+        wait: true
+      when: aws_windows_instances | length > 0
