@@ -70,7 +70,7 @@
 
     - name: Launch Azure Linux bootstrap workflow
       ansible.controller.workflow_launch:
-        workflow_template: "Linux-bootstrap"
+        workflow_template: "Linux-bootstrap-azure"
         limit: "{{ azure_linux_vms | join(',') }}"
         extra_vars:
           vm_name: "{{ azure_linux_vms | join(',') }}"
@@ -81,7 +81,7 @@
 
     - name: Launch Azure Windows bootstrap workflow
       ansible.controller.workflow_launch:
-        workflow_template: "Windows-bootstrap"
+        workflow_template: "Windows-bootstrap-azure"
         limit: "{{ azure_windows_vms | join(',') }}"
         extra_vars:
           vm_name: "{{ azure_windows_vms | join(',') }}"
@@ -92,7 +92,7 @@
 
     - name: Launch AWS Linux bootstrap workflow
       ansible.controller.workflow_launch:
-        workflow_template: "Linux-bootstrap"
+        workflow_template: "Linux-bootstrap-aws"
         limit: "{{ aws_linux_instances | join(',') }}"
         extra_vars:
           vm_name: "{{ aws_linux_instances | join(',') }}"
@@ -103,7 +103,7 @@
 
     - name: Launch AWS Windows bootstrap workflow
       ansible.controller.workflow_launch:
-        workflow_template: "Windows-bootstrap"
+        workflow_template: "Windows-bootstrap-aws"
         limit: "{{ aws_windows_instances | join(',') }}"
         extra_vars:
           vm_name: "{{ aws_windows_instances | join(',') }}"
