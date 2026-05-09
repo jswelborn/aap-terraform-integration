@@ -18,6 +18,7 @@
       ansible.builtin.set_fact:
         azure_linux_vms: []
         azure_windows_vms: []
+        aws_instance_changes: []
         aws_linux_instances: []
         aws_windows_instances: []
 
@@ -39,26 +40,59 @@
         - "'create' in item.change.actions"
         - item.change.after.name is defined
 
-    - name: Find newly created AWS Windows instances
+    - name: Collect newly created AWS instances
       ansible.builtin.set_fact:
-        aws_windows_instances: "{{ aws_windows_instances + [item.change.after.tags.Name] }}"
+        aws_instance_changes: "{{ aws_instance_changes + [item] }}"
       loop: "{{ planresults.json_output.resource_changes }}"
       when:
         - item.type == "aws_instance"
         - "'create' in item.change.actions"
         - item.change.after.tags.Name is defined
-        - item.change.after.platform is defined
-        - item.change.after.platform | lower == "windows"
+        - item.change.after.ami is defined
+        - item.change.after.region is defined
 
-    - name: Find newly created AWS Linux instances
+    - name: Look up AWS AMI metadata
+      amazon.aws.ec2_ami_info:
+        image_ids:
+          - "{{ item.change.after.ami }}"
+        region: "{{ item.change.after.region }}"
+      loop: "{{ aws_instance_changes }}"
+      register: aws_ami_lookup
+      when: aws_instance_changes | length > 0
+
+    - name: Route AWS Windows instances
       ansible.builtin.set_fact:
-        aws_linux_instances: "{{ aws_linux_instances + [item.change.after.tags.Name] }}"
-      loop: "{{ planresults.json_output.resource_changes }}"
+        aws_windows_instances: "{{ aws_windows_instances + [item.item.change.after.tags.Name] }}"
+      loop: "{{ aws_ami_lookup.results | default([]) }}"
       when:
-        - item.type == "aws_instance"
-        - "'create' in item.change.actions"
-        - item.change.after.tags.Name is defined
-        - item.change.after.platform is not defined or item.change.after.platform | default('') | lower != "windows"
+        - item.images is defined
+        - item.images | length > 0
+        - >
+          'windows' in (
+            (
+              item.images[0].platform_details | default('')
+            ) ~ ' ' ~
+            (
+              item.images[0].name | default('')
+            )
+          ) | lower
+
+    - name: Route AWS Linux instances
+      ansible.builtin.set_fact:
+        aws_linux_instances: "{{ aws_linux_instances + [item.item.change.after.tags.Name] }}"
+      loop: "{{ aws_ami_lookup.results | default([]) }}"
+      when:
+        - item.images is defined
+        - item.images | length > 0
+        - >
+          'windows' not in (
+            (
+              item.images[0].platform_details | default('')
+            ) ~ ' ' ~
+            (
+              item.images[0].name | default('')
+            )
+          ) | lower
 
     - name: Show routing results
       ansible.builtin.debug:
