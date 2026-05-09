@@ -23,6 +23,10 @@
         aws_linux_instances: []
         aws_windows_instances: []
 
+    - name: Set AWS region from Terraform outputs
+      ansible.builtin.set_fact:
+        aws_region: "{{ planresults.json_output.planned_values.outputs.aws_region.value }}"
+
     - name: Find newly created Azure Linux VMs
       ansible.builtin.set_fact:
         azure_linux_vms: "{{ azure_linux_vms + [item.change.after.name] }}"
@@ -52,6 +56,7 @@
 
     - name: Gather AWS instance metadata
       amazon.aws.ec2_instance_info:
+        region: "{{ aws_region }}"
         filters:
           "tag:Name": "{{ item }}"
       loop: "{{ aws_instance_names }}"
