@@ -50,43 +50,37 @@
         - "'create' in item.change.actions"
         - item.change.after.tags.Name is defined
 
-    - name: Get AWS host information from inventory
-      ansible.controller.host_info:
-        name: "{{ item }}"
-        inventory: "AWS"
+    - name: Gather AWS instance metadata
+      amazon.aws.ec2_instance_info:
+        filters:
+          "tag:Name": "{{ item }}"
       loop: "{{ aws_instance_names }}"
-      register: aws_host_info
+      register: aws_instance_info
       when: aws_instance_names | length > 0
 
     - name: Route AWS Windows instances
       ansible.builtin.set_fact:
         aws_windows_instances: "{{ aws_windows_instances + [item.item] }}"
-      loop: "{{ aws_host_info.results | default([]) }}"
+      loop: "{{ aws_instance_info.results }}"
       when:
-        - item.hosts is defined
-        - item.hosts | length > 0
+        - item.instances is defined
+        - item.instances | length > 0
         - >
-          'Windows' in (
-            item.hosts[0].summary_fields.groups.results
-            | default([])
-            | map(attribute='name')
-            | list
-          )
+          'windows' in (
+            item.instances[0].platform_details | default('')
+          ) | lower
 
     - name: Route AWS Linux instances
       ansible.builtin.set_fact:
         aws_linux_instances: "{{ aws_linux_instances + [item.item] }}"
-      loop: "{{ aws_host_info.results | default([]) }}"
+      loop: "{{ aws_instance_info.results }}"
       when:
-        - item.hosts is defined
-        - item.hosts | length > 0
+        - item.instances is defined
+        - item.instances | length > 0
         - >
-          'Linux' in (
-            item.hosts[0].summary_fields.groups.results
-            | default([])
-            | map(attribute='name')
-            | list
-          )
+          'windows' not in (
+            item.instances[0].platform_details | default('')
+          ) | lower
 
     - name: Show routing results
       ansible.builtin.debug:
