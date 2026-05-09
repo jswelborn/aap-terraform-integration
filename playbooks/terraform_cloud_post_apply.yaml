@@ -49,13 +49,13 @@
         - "'create' in item.change.actions"
         - item.change.after.tags.Name is defined
         - item.change.after.ami is defined
-        - item.change.after.region is defined
+        - item.change.after.availability_zone is defined
 
     - name: Look up AWS AMI metadata
       amazon.aws.ec2_ami_info:
         image_ids:
           - "{{ item.change.after.ami }}"
-        region: "{{ item.change.after.region }}"
+        region: "{{ item.change.after.availability_zone | regex_replace('[a-z]$', '') }}"
       loop: "{{ aws_instance_changes }}"
       register: aws_ami_lookup
       when: aws_instance_changes | length > 0
