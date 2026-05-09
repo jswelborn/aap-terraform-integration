@@ -58,6 +58,14 @@
       register: aws_instance_info
       when: aws_instance_names | length > 0
 
+    - name: Debug AWS instance metadata
+      ansible.builtin.debug:
+        var: item.instances[0].platform_details
+      loop: "{{ aws_instance_info.results }}"
+      when:
+        - item.instances is defined
+        - item.instances | length > 0
+
     - name: Route AWS Windows instances
       ansible.builtin.set_fact:
         aws_windows_instances: "{{ aws_windows_instances + [item.item] }}"
