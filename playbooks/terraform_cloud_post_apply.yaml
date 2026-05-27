@@ -26,6 +26,8 @@
     - name: Set AWS region from Terraform outputs
       ansible.builtin.set_fact:
         aws_region: "{{ planresults.json_output.planned_values.outputs.aws_region.value }}"
+      when:
+        - planresults.json_output.planned_values.outputs.aws_region is defined
 
     - name: Find newly created Azure Linux VMs
       ansible.builtin.set_fact:
@@ -61,7 +63,9 @@
           "tag:Name": "{{ item }}"
       loop: "{{ aws_instance_names }}"
       register: aws_instance_info
-      when: aws_instance_names | length > 0
+      when: 
+        - aws_instance_names | length > 0
+        - aws_region is defined
 
     - name: Route AWS Windows instances
       ansible.builtin.set_fact:
