@@ -15,7 +15,7 @@
       action:
         run_job_template:
           name: "Terraform Cloud VM Post Apply"
-          organization: "Default"
+          organization: "HTS SRE"
           job_args:
             extra_vars:
               run_id: "{{ event.payload.run_id }}"
