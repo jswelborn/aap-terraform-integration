@@ -3,6 +3,10 @@
   hosts: localhost
   gather_facts: false
 
+  vars:
+    controller_host: "{{ lookup('ansible.builtin.env', 'CONTROLLER_HOST') }}"
+    controller_oauth_token: "{{ lookup('ansible.builtin.env', 'CONTROLLER_OAUTH_TOKEN') }}"
+
   tasks:
     - name: Get JSON plan information by run ID
       hashicorp.terraform.view_plan:
@@ -47,6 +51,30 @@
         - "'create' in item.change.actions"
         - item.change.after.name is defined
 
+    - name: Get Azure inventory sources from controller
+      ansible.builtin.uri:
+        url: "{{ controller_host }}/api/controller/v2/inventory_sources/?source=azure_rm&page_size=200"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ controller_oauth_token }}"
+        validate_certs: false
+        return_content: true
+      register: azure_inventory_sources_result
+      when:
+        - (azure_linux_vms | length > 0) or (azure_windows_vms | length > 0)
+
+    - name: Sync Azure inventory sources
+      ansible.controller.inventory_source_update:
+        name: "{{ item.name }}"
+        inventory: "{{ item.summary_fields.inventory.name }}"
+        organization: "{{ item.summary_fields.organization.name }}"
+        wait: true
+      loop: "{{ azure_inventory_sources_result.json.results | default([]) }}"
+      when:
+        - (azure_linux_vms | length > 0) or (azure_windows_vms | length > 0)
+        - azure_inventory_sources_result.json.results is defined
+        - azure_inventory_sources_result.json.results | length > 0
+
     - name: Find newly created AWS instances
       ansible.builtin.set_fact:
         aws_instance_names: "{{ aws_instance_names + [item.change.after.tags.Name] }}"
@@ -63,7 +91,7 @@
           "tag:Name": "{{ item }}"
       loop: "{{ aws_instance_names }}"
       register: aws_instance_info
-      when: 
+      when:
         - aws_instance_names | length > 0
         - aws_region is defined
 
@@ -74,10 +102,7 @@
       when:
         - item.instances is defined
         - item.instances | length > 0
-        - >
-          'windows' in (
-            item.instances[0].platform_details | default('')
-          ) | lower
+        - "'windows' in (item.instances[0].platform_details | default('') | lower)"
 
     - name: Route AWS Linux instances
       ansible.builtin.set_fact:
@@ -86,10 +111,7 @@
       when:
         - item.instances is defined
         - item.instances | length > 0
-        - >
-          'windows' not in (
-            item.instances[0].platform_details | default('')
-          ) | lower
+        - "'windows' not in (item.instances[0].platform_details | default('') | lower)"
 
     - name: Show routing results
       ansible.builtin.debug:
