@@ -4,8 +4,8 @@
   gather_facts: false
 
   vars:
-    controller_host: "{{ lookup('ansible.builtin.env', 'CONTROLLER_HOST') }}"
-    controller_oauth_token: "{{ lookup('ansible.builtin.env', 'CONTROLLER_OAUTH_TOKEN') }}"
+    azure_inventory_name: "Azure"
+    azure_inventory_organization: "HTS SRE"
 
   tasks:
     - name: Get JSON plan information by run ID
@@ -26,6 +26,7 @@
         aws_instance_names: []
         aws_linux_instances: []
         aws_windows_instances: []
+        matched_azure_inventory_sources: []
 
     - name: Set AWS region from Terraform outputs
       ansible.builtin.set_fact:
@@ -51,29 +52,55 @@
         - "'create' in item.change.actions"
         - item.change.after.name is defined
 
-    - name: Get Azure inventory sources from controller
-      ansible.builtin.uri:
-        url: "{{ controller_host }}/api/controller/v2/inventory_sources/?source=azure_rm&page_size=200"
-        method: GET
-        headers:
-          Authorization: "Bearer {{ controller_oauth_token }}"
-        validate_certs: false
-        return_content: true
-      register: azure_inventory_sources_result
+    - name: Extract Azure subscription ID from Terraform plan
+      ansible.builtin.set_fact:
+        azure_subscription_id: >-
+          {{
+            planresults.json_output
+            | to_json
+            | regex_search('/subscriptions/([0-9a-fA-F-]{36})', '\1')
+            | first
+          }}
       when:
         - (azure_linux_vms | length > 0) or (azure_windows_vms | length > 0)
 
-    - name: Sync Azure inventory sources
+    - name: Get Azure inventory sources from controller
+      ansible.controller.inventory_source_info:
+        inventory: "{{ azure_inventory_name }}"
+        organization: "{{ azure_inventory_organization }}"
+      register: azure_inventory_source_info
+      when:
+        - azure_subscription_id is defined
+
+    - name: Match Azure inventory source by aap_subscription_id
+      ansible.builtin.set_fact:
+        matched_azure_inventory_sources: "{{ matched_azure_inventory_sources + [item] }}"
+      loop: "{{ azure_inventory_source_info.inventory_sources | default([]) }}"
+      when:
+        - azure_subscription_id is defined
+        - item.source == "azure_rm"
+        - item.source_vars is defined
+        - "'aap_subscription_id' in (item.source_vars | string)"
+        - azure_subscription_id in (item.source_vars | string)
+
+    - name: Fail if no matching Azure inventory source was found
+      ansible.builtin.fail:
+        msg: >-
+          No Azure inventory source was found with aap_subscription_id={{ azure_subscription_id }}.
+          Add aap_subscription_id to the matching Azure inventory source variables.
+      when:
+        - azure_subscription_id is defined
+        - matched_azure_inventory_sources | length == 0
+
+    - name: Sync matching Azure inventory source before bootstrap
       ansible.controller.inventory_source_update:
         name: "{{ item.name }}"
-        inventory: "{{ item.summary_fields.inventory.name }}"
-        organization: "{{ item.summary_fields.organization.name }}"
+        inventory: "{{ azure_inventory_name }}"
+        organization: "{{ azure_inventory_organization }}"
         wait: true
-      loop: "{{ azure_inventory_sources_result.json.results | default([]) }}"
+      loop: "{{ matched_azure_inventory_sources }}"
       when:
-        - (azure_linux_vms | length > 0) or (azure_windows_vms | length > 0)
-        - azure_inventory_sources_result.json.results is defined
-        - azure_inventory_sources_result.json.results | length > 0
+        - matched_azure_inventory_sources | length > 0
 
     - name: Find newly created AWS instances
       ansible.builtin.set_fact:
@@ -116,6 +143,8 @@
     - name: Show routing results
       ansible.builtin.debug:
         msg:
+          azure_subscription_id: "{{ azure_subscription_id | default('N/A') }}"
+          matched_azure_inventory_sources: "{{ matched_azure_inventory_sources | map(attribute='name') | list }}"
           azure_linux_vms: "{{ azure_linux_vms }}"
           azure_windows_vms: "{{ azure_windows_vms }}"
           aws_linux_instances: "{{ aws_linux_instances }}"
