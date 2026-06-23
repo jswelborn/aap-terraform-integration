@@ -62,12 +62,19 @@
         - (azure_linux_vms | length > 0) or (azure_windows_vms | length > 0)
 
     - name: Sync all Azure inventory sources before bootstrap
-      ansible.controller.inventory_source_update:
-        name: "{{ item.name }}"
-        inventory: "{{ item.summary_fields.inventory.name }}"
-        organization: "{{ item.summary_fields.organization.name }}"
-        wait: true
+      ansible.builtin.uri:
+        url: "{{ lookup('ansible.builtin.env', 'CONTROLLER_HOST') }}{{ item.related.update }}"
+        method: POST
+        user: "{{ lookup('ansible.builtin.env', 'CONTROLLER_USERNAME') }}"
+        password: "{{ lookup('ansible.builtin.env', 'CONTROLLER_PASSWORD') }}"
+        force_basic_auth: true
+        validate_certs: false
+        status_code:
+          - 200
+          - 201
+          - 202
       loop: "{{ azure_inventory_sources_result.json.results | default([]) }}"
+      no_log: true
       when:
         - (azure_linux_vms | length > 0) or (azure_windows_vms | length > 0)
         - azure_inventory_sources_result.json.results is defined
@@ -122,7 +129,7 @@
         msg:
           azure_linux_vms: "{{ azure_linux_vms }}"
           azure_windows_vms: "{{ azure_windows_vms }}"
-          azure_inventory_sources_synced: "{{ azure_inventory_sources_result.json.results | default([]) | map(attribute='name') | list }}"
+          azure_inventory_sources_found: "{{ azure_inventory_sources_result.json.count | default(0) }}"
           aws_linux_instances: "{{ aws_linux_instances }}"
           aws_windows_instances: "{{ aws_windows_instances }}"
 
