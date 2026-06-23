@@ -120,7 +120,9 @@
           - 201
           - 202
       loop: "{{ matched_azure_inventory_sources }}"
-      no_log: true
+      loop_control:
+        label: "{{ item.name }}"
+      no_log: false
       when:
         - matched_azure_inventory_sources | length > 0
 
