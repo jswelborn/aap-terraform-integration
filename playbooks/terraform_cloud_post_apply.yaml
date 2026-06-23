@@ -114,7 +114,7 @@
 
     - name: Sync matching Azure inventory source before bootstrap
       ansible.builtin.uri:
-        url: "{{ controller_host }}{{ item.related.update }}"
+        url: "{{ controller_host }}{{ item.related['update'] }}"
         method: POST
         user: "{{ controller_username }}"
         password: "{{ controller_password }}"
