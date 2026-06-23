@@ -113,18 +113,12 @@
         - matched_azure_inventory_sources | length == 0
 
     - name: Sync matching Azure inventory source before bootstrap
-      ansible.builtin.uri:
-        url: "{{ controller_host }}{{ item.related['update'] }}"
-        method: POST
-        user: "{{ controller_username }}"
-        password: "{{ controller_password }}"
-        force_basic_auth: true
-        validate_certs: false
-        status_code:
-          - 200
-          - 201
-          - 202
-          - 204
+      ansible.controller.inventory_source_update:
+        name: "{{ item.name }}"
+        inventory: "{{ item.summary_fields.inventory.name }}"
+        organization: "{{ item.summary_fields.organization.name }}"
+        wait: true
+        request_timeout: 30
       loop: "{{ matched_azure_inventory_sources }}"
       loop_control:
         label: "{{ item.name }}"
