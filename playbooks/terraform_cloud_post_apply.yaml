@@ -48,14 +48,18 @@
         - "'create' in item.change.actions"
         - item.change.after.name is defined
 
-    - name: Extract Azure subscription ID from Terraform plan
+    - name: Extract Azure subscription ID from Azure resource IDs
       ansible.builtin.set_fact:
         azure_subscription_id: >-
           {{
-            planresults.json_output
-            | to_json
-            | regex_search('/subscriptions/([0-9a-fA-F-]{36})', '\1')
-            | first
+            (
+              planresults.json_output.resource_changes
+              | selectattr('provider_name', 'equalto', 'registry.terraform.io/hashicorp/azurerm')
+              | map(attribute='change.after')
+              | map('to_json')
+              | join(' ')
+              | regex_search('/subscriptions/([0-9a-fA-F-]{36})', '\1')
+            ) | first
           }}
       when:
         - (azure_linux_vms | length > 0) or (azure_windows_vms | length > 0)
