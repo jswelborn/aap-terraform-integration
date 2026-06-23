@@ -194,6 +194,7 @@
           cloud_provider: "azure"
           operating_system: "linux"
         wait: true
+        request_timeout: 30
       when: azure_linux_vms | length > 0
 
     - name: Launch Azure Windows bootstrap workflow
@@ -205,6 +206,7 @@
           cloud_provider: "azure"
           operating_system: "windows"
         wait: true
+        request_timeout: 30
       when: azure_windows_vms | length > 0
 
     - name: Launch AWS Linux bootstrap workflow
@@ -216,6 +218,7 @@
           cloud_provider: "aws"
           operating_system: "linux"
         wait: true
+        request_timeout: 30
       when: aws_linux_instances | length > 0
 
     - name: Launch AWS Windows bootstrap workflow
@@ -227,4 +230,5 @@
           cloud_provider: "aws"
           operating_system: "windows"
         wait: true
+        request_timeout: 30
       when: aws_windows_instances | length > 0
