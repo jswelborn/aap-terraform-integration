@@ -86,6 +86,14 @@
         - azure_subscription_id is defined
         - azure_inventory_sources_result.json.results is defined
 
+    - name: Show extracted Azure subscription ID
+      ansible.builtin.debug:
+        var: azure_subscription_id
+
+    - name: Show matched Azure inventory source names
+      ansible.builtin.debug:
+        msg: "{{ matched_azure_inventory_sources | map(attribute='name') | list }}"
+
     - name: Fail if no matching Azure inventory source was found
       ansible.builtin.fail:
         msg: >-
