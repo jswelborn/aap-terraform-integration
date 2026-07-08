@@ -139,20 +139,28 @@
         - "'create' in item.change.actions"
         - item.change.after.tags.Name is defined
 
-    - name: Find AWS account ID candidates from Terraform AWS ARNs
+    - name: Find AWS account ID candidates from Terraform plan
       ansible.builtin.set_fact:
         aws_account_id_candidates: >-
           {{
-            planresults.json_output
-            | to_json
-            | regex_findall('arn:aws[a-zA-Z-]*:ec2:[^:]+:([0-9]{12}):instance/')
+            (
+              planresults.json_output
+              | to_json
+              | regex_findall('arn:aws[a-zA-Z-]*:iam::([0-9]{12}):role/')
+            )
+            +
+            (
+              planresults.json_output
+              | to_json
+              | regex_findall('arn:aws[a-zA-Z-]*:ec2:[^:]+:([0-9]{12}):instance/')
+            )
           }}
       when:
         - aws_instance_names | length > 0
 
-    - name: Set AWS account ID from Terraform AWS ARN
+    - name: Set AWS account ID from Terraform plan
       ansible.builtin.set_fact:
-        aws_account_id: "{{ aws_account_id_candidates | first }}"
+        aws_account_id: "{{ aws_account_id_candidates | unique | first }}"
       when:
         - aws_instance_names | length > 0
         - aws_account_id_candidates is defined
@@ -162,8 +170,8 @@
       ansible.builtin.fail:
         msg: >-
           AWS instances were created, but the AWS account ID could not be extracted
-          from Terraform plan output. Expected an EC2 ARN like
-          arn:aws:ec2:region:account_id:instance/instance_id.
+          from Terraform plan output. Expected an IAM role ARN like
+          arn:aws:iam::123456789012:role/name or an EC2 ARN.
       when:
         - aws_instance_names | length > 0
         - aws_account_id is not defined
