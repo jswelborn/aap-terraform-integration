@@ -99,10 +99,14 @@
     - name: Show extracted Azure subscription ID
       ansible.builtin.debug:
         var: azure_subscription_id
+      when:
+        - azure_subscription_id is defined
 
     - name: Show matched Azure inventory source names
       ansible.builtin.debug:
         msg: "{{ matched_azure_inventory_sources | map(attribute='name') | list }}"
+      when:
+        - azure_subscription_id is defined
 
     - name: Fail if no matching Azure inventory source was found
       ansible.builtin.fail:
@@ -134,6 +138,98 @@
         - item.type == "aws_instance"
         - "'create' in item.change.actions"
         - item.change.after.tags.Name is defined
+
+    - name: Find AWS account ID candidates from Terraform AWS ARNs
+      ansible.builtin.set_fact:
+        aws_account_id_candidates: >-
+          {{
+            planresults.json_output
+            | to_json
+            | regex_findall('arn:aws[a-zA-Z-]*:ec2:[^:]+:([0-9]{12}):instance/')
+          }}
+      when:
+        - aws_instance_names | length > 0
+
+    - name: Set AWS account ID from Terraform AWS ARN
+      ansible.builtin.set_fact:
+        aws_account_id: "{{ aws_account_id_candidates | first }}"
+      when:
+        - aws_instance_names | length > 0
+        - aws_account_id_candidates is defined
+        - aws_account_id_candidates | length > 0
+
+    - name: Fail if AWS account ID could not be determined
+      ansible.builtin.fail:
+        msg: >-
+          AWS instances were created, but the AWS account ID could not be extracted
+          from Terraform plan output. Expected an EC2 ARN like
+          arn:aws:ec2:region:account_id:instance/instance_id.
+      when:
+        - aws_instance_names | length > 0
+        - aws_account_id is not defined
+
+    - name: Get AWS inventory sources from controller
+      ansible.builtin.uri:
+        url: "{{ controller_host }}/api/controller/v2/inventory_sources/?source=ec2&page_size=200"
+        method: GET
+        user: "{{ controller_username }}"
+        password: "{{ controller_password }}"
+        force_basic_auth: true
+        validate_certs: false
+        return_content: true
+      register: aws_inventory_sources_result
+      no_log: true
+      when:
+        - aws_instance_names | length > 0
+        - aws_account_id is defined
+
+    - name: Match AWS inventory source by account ID in iam_role_arn
+      ansible.builtin.set_fact:
+        matched_aws_inventory_sources: >-
+          {{
+            aws_inventory_sources_result.json.results
+            | selectattr('source_vars', 'search', 'iam_role_arn: arn:aws:iam::' ~ aws_account_id ~ ':role/')
+            | list
+          }}
+      when:
+        - aws_instance_names | length > 0
+        - aws_account_id is defined
+        - aws_inventory_sources_result.json.results is defined
+
+    - name: Show extracted AWS account ID
+      ansible.builtin.debug:
+        var: aws_account_id
+      when:
+        - aws_instance_names | length > 0
+        - aws_account_id is defined
+
+    - name: Show matched AWS inventory source names
+      ansible.builtin.debug:
+        msg: "{{ matched_aws_inventory_sources | map(attribute='name') | list }}"
+      when:
+        - aws_instance_names | length > 0
+
+    - name: Fail if no matching AWS inventory source was found
+      ansible.builtin.fail:
+        msg: >-
+          No AWS inventory source found with iam_role_arn containing AWS account ID {{ aws_account_id }}.
+      when:
+        - aws_instance_names | length > 0
+        - aws_account_id is defined
+        - matched_aws_inventory_sources | length == 0
+
+    - name: Sync matching AWS inventory source before bootstrap
+      ansible.controller.inventory_source_update:
+        name: "{{ item.name }}"
+        inventory: "{{ item.summary_fields.inventory.name }}"
+        organization: "{{ item.summary_fields.organization.name }}"
+        wait: true
+        request_timeout: 30
+      loop: "{{ matched_aws_inventory_sources }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when:
+        - matched_aws_inventory_sources | length > 0
 
     - name: Gather AWS instance metadata
       amazon.aws.ec2_instance_info:
@@ -177,6 +273,8 @@
           matched_azure_inventory_sources: "{{ matched_azure_inventory_sources | map(attribute='name') | list }}"
           azure_linux_vms: "{{ azure_linux_vms }}"
           azure_windows_vms: "{{ azure_windows_vms }}"
+          aws_account_id: "{{ aws_account_id | default('N/A') }}"
+          matched_aws_inventory_sources: "{{ matched_aws_inventory_sources | map(attribute='name') | list }}"
           aws_linux_instances: "{{ aws_linux_instances }}"
           aws_windows_instances: "{{ aws_windows_instances }}"
 
