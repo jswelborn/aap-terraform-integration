@@ -191,12 +191,12 @@
         - aws_instance_names | length > 0
         - aws_account_id is defined
 
-    - name: Match AWS inventory source by account ID in iam_role_arn
+    - name: Match AWS inventory source by AWS account ID in source vars
       ansible.builtin.set_fact:
         matched_aws_inventory_sources: >-
           {{
             aws_inventory_sources_result.json.results
-            | selectattr('source_vars', 'search', 'iam_role_arn: arn:aws:iam::' ~ aws_account_id ~ ':role/')
+            | selectattr('source_vars', 'search', aws_account_id)
             | list
           }}
       when:
@@ -220,7 +220,8 @@
     - name: Fail if no matching AWS inventory source was found
       ansible.builtin.fail:
         msg: >-
-          No AWS inventory source found with iam_role_arn containing AWS account ID {{ aws_account_id }}.
+          No AWS inventory source found with AWS account ID {{ aws_account_id }}
+          in source_vars.
       when:
         - aws_instance_names | length > 0
         - aws_account_id is defined
