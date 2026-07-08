@@ -251,18 +251,29 @@
         - matched_aws_inventory_sources | length > 0
         - aws_account_id is defined
 
+    - name: Assume AWS inventory role for metadata lookup
+      amazon.aws.sts_assume_role:
+        role_arn: "{{ aws_assume_role_arn }}"
+        role_session_name: "aap-terraform-post-apply"
+      register: aws_assumed_role
+      when:
+        - aws_instance_names | length > 0
+        - aws_assume_role_arn is defined
+
     - name: Gather AWS instance metadata
       amazon.aws.ec2_instance_info:
         region: "{{ aws_region }}"
+        access_key: "{{ aws_assumed_role.sts_creds.access_key }}"
+        secret_key: "{{ aws_assumed_role.sts_creds.secret_key }}"
+        session_token: "{{ aws_assumed_role.sts_creds.session_token }}"
         filters:
           "tag:Name": "{{ item }}"
-        assume_role_arn: "{{ aws_assume_role_arn }}"
       loop: "{{ aws_instance_names }}"
       register: aws_instance_info
       when:
         - aws_instance_names | length > 0
         - aws_region is defined
-        - aws_assume_role_arn is defined
+        - aws_assumed_role.sts_creds is defined
 
     - name: Route AWS Windows instances
       ansible.builtin.set_fact:
