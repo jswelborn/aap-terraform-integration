@@ -28,6 +28,7 @@
         aws_linux_instances: []
         aws_windows_instances: []
         matched_azure_inventory_sources: []
+        matched_aws_inventory_sources: []
 
     - name: Set AWS region from Terraform outputs
       ansible.builtin.set_fact:
