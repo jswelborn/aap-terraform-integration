@@ -293,7 +293,7 @@
               copying {{ aws_source_workflow_name }}.
 
         #######################################################################
-        # Wait for all copied workflow nodes
+        # Wait for the copied workflow graph
         #######################################################################
 
         - name: Wait for copied workflow nodes
@@ -453,31 +453,33 @@
           no_log: true
 
         #######################################################################
-        # Remove existing Machine credentials only
+        # Remove existing Machine credentials with curl
         #######################################################################
 
         - name: Remove existing Machine credentials from copied nodes
-          ansible.builtin.uri:
-            url: >-
-              {{
-                controller_host
-                ~ '/api/controller/v2/workflow_job_template_nodes/'
-                ~ (item.0.item.node_id | string)
-                ~ '/credentials/'
-              }}
-            method: POST
-            user: "{{ controller_username }}"
-            password: "{{ controller_password }}"
-            force_basic_auth: true
-            validate_certs: false
-            body_format: json
-            body:
-              id: "{{ item.1.id }}"
-              disassociate: true
-            status_code:
-              - 200
-              - 201
-              - 204
+          ansible.builtin.command:
+            argv:
+              - curl
+              - --silent
+              - --show-error
+              - --fail-with-body
+              - --insecure
+              - --request
+              - POST
+              - --user
+              - "{{ controller_username }}:{{ controller_password }}"
+              - --header
+              - "Content-Type: application/json"
+              - --data-binary
+              - >-
+                {"id":{{ item.1.id | int }},"disassociate":true}
+              - >-
+                {{
+                  controller_host
+                  ~ '/api/controller/v2/workflow_job_template_nodes/'
+                  ~ (item.0.item.node_id | string)
+                  ~ '/credentials/'
+                }}
           loop: >-
             {{
               aws_dynamic_node_credentials.results
@@ -490,6 +492,7 @@
                 ~ ' -> '
                 ~ item.1.name
               }}
+          changed_when: true
           no_log: true
           when:
             - item.1.summary_fields is defined
@@ -497,34 +500,33 @@
             - item.1.summary_fields.credential_type.kind == "ssh"
 
         #######################################################################
-        # Assign selected Terraform Machine credential
-        #
-        # The source value comes directly from parsed Controller JSON, where
-        # the credential ID is already represented as an integer.
+        # Assign selected Terraform Machine credential with curl
         #######################################################################
 
         - name: Assign Terraform Machine credential to copied nodes
-          ansible.builtin.uri:
-            url: >-
-              {{
-                controller_host
-                ~ '/api/controller/v2/workflow_job_template_nodes/'
-                ~ (item.node_id | string)
-                ~ '/credentials/'
-              }}
-            method: POST
-            user: "{{ controller_username }}"
-            password: "{{ controller_password }}"
-            force_basic_auth: true
-            validate_certs: false
-            body_format: json
-            body:
-              id: "{{ aws_machine_credential_result.json.results[0].id }}"
-            return_content: true
-            status_code:
-              - 200
-              - 201
-              - 204
+          ansible.builtin.command:
+            argv:
+              - curl
+              - --silent
+              - --show-error
+              - --fail-with-body
+              - --insecure
+              - --request
+              - POST
+              - --user
+              - "{{ controller_username }}:{{ controller_password }}"
+              - --header
+              - "Content-Type: application/json"
+              - --data-binary
+              - >-
+                {"id":{{ aws_machine_credential.id | int }}}
+              - >-
+                {{
+                  controller_host
+                  ~ '/api/controller/v2/workflow_job_template_nodes/'
+                  ~ (item.node_id | string)
+                  ~ '/credentials/'
+                }}
           loop: "{{ aws_dynamic_credential_nodes }}"
           loop_control:
             label: >-
@@ -534,9 +536,11 @@
                 ~ aws_machine_credential_name
               }}
           register: aws_machine_credential_assignments
+          changed_when: true
+          no_log: true
 
         #######################################################################
-        # Confirm both nodes received the selected credential
+        # Confirm both copied nodes received the selected credential
         #######################################################################
 
         - name: Read updated credentials from copied nodes
@@ -569,7 +573,7 @@
                 | selectattr(
                     'id',
                     'equalto',
-                    aws_machine_credential_result.json.results[0].id
+                    aws_machine_credential.id
                   )
                 | list
                 | length == 1
