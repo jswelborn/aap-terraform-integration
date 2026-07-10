@@ -130,18 +130,13 @@
               {{
                 aws_machine_credential_result.json.results[0]
               }}
-            aws_machine_credential_id: >-
-              {{
-                aws_machine_credential_result.json.results[0].id | int
-              }}
 
         - name: Show selected credential details
           ansible.builtin.debug:
             msg:
               credential_name: "{{ aws_machine_credential.name }}"
-              credential_id: "{{ aws_machine_credential_id }}"
-              credential_id_type: >-
-                {{ aws_machine_credential_id | type_debug }}
+              credential_id: "{{ aws_machine_credential.id }}"
+              credential_id_type: "{{ aws_machine_credential.id | type_debug }}"
 
         #######################################################################
         # Locate the permanent workflow
@@ -183,7 +178,7 @@
           ansible.builtin.set_fact:
             aws_source_workflow_id: >-
               {{
-                aws_source_workflow_result.json.results[0].id | int
+                aws_source_workflow_result.json.results[0].id
               }}
 
         #######################################################################
@@ -285,7 +280,7 @@
           ansible.builtin.set_fact:
             aws_temporary_workflow_id: >-
               {{
-                aws_temporary_workflow_copy_result.json.id | int
+                aws_temporary_workflow_copy_result.json.id
               }}
 
         - name: Validate temporary workflow copy response
@@ -298,7 +293,7 @@
               copying {{ aws_source_workflow_name }}.
 
         #######################################################################
-        # Wait for the copied workflow graph to become available
+        # Wait for all copied workflow nodes
         #######################################################################
 
         - name: Wait for copied workflow nodes
@@ -345,7 +340,7 @@
               {{ aws_expected_workflow_node_count }} expected nodes.
 
         #######################################################################
-        # Select only Linux-postbuild-aws and Linux-identity-aws
+        # Select Linux-postbuild-aws and Linux-identity-aws
         #######################################################################
 
         - name: Initialize dynamic credential workflow nodes
@@ -360,13 +355,13 @@
                 +
                 [
                   {
-                    'node_id': item.id | int,
+                    'node_id': item.id,
                     'node_identifier': (
                       item.identifier
                       | default(item.id | string)
                     ),
                     'job_template_id': (
-                      item.summary_fields.unified_job_template.id | int
+                      item.summary_fields.unified_job_template.id
                     ),
                     'job_template_name': (
                       item.summary_fields.unified_job_template.name
@@ -432,7 +427,7 @@
             label: "{{ item.job_template_name }}"
 
         #######################################################################
-        # Read credentials currently assigned to the copied nodes
+        # Read credentials currently assigned to copied nodes
         #######################################################################
 
         - name: Get credentials assigned to copied dynamic nodes
@@ -475,13 +470,10 @@
             password: "{{ controller_password }}"
             force_basic_auth: true
             validate_certs: false
-            headers:
-              Content-Type: application/json
-            body: >-
-              {
-                "id": {{ item.1.id | int }},
-                "disassociate": true
-              }
+            body_format: json
+            body:
+              id: "{{ item.1.id }}"
+              disassociate: true
             status_code:
               - 200
               - 201
@@ -505,7 +497,10 @@
             - item.1.summary_fields.credential_type.kind == "ssh"
 
         #######################################################################
-        # Assign the selected Terraform Machine credential
+        # Assign selected Terraform Machine credential
+        #
+        # The source value comes directly from parsed Controller JSON, where
+        # the credential ID is already represented as an integer.
         #######################################################################
 
         - name: Assign Terraform Machine credential to copied nodes
@@ -522,10 +517,9 @@
             password: "{{ controller_password }}"
             force_basic_auth: true
             validate_certs: false
-            headers:
-              Content-Type: application/json
-            body: >-
-              {"id": {{ aws_machine_credential_id | int }}}
+            body_format: json
+            body:
+              id: "{{ aws_machine_credential_result.json.results[0].id }}"
             return_content: true
             status_code:
               - 200
@@ -542,7 +536,7 @@
           register: aws_machine_credential_assignments
 
         #######################################################################
-        # Confirm both copied nodes received the selected credential
+        # Confirm both nodes received the selected credential
         #######################################################################
 
         - name: Read updated credentials from copied nodes
@@ -575,7 +569,7 @@
                 | selectattr(
                     'id',
                     'equalto',
-                    aws_machine_credential_id
+                    aws_machine_credential_result.json.results[0].id
                   )
                 | list
                 | length == 1
@@ -590,7 +584,7 @@
             label: "{{ item.item.job_template_name }}"
 
         #######################################################################
-        # Launch the isolated copied workflow
+        # Launch the isolated temporary workflow
         #######################################################################
 
         - name: Launch temporary AWS Linux bootstrap workflow
