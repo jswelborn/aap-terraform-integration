@@ -118,7 +118,7 @@
               }}
 
         #######################################################################
-        # Locate and copy the permanent workflow using the Controller API
+        # Locate the permanent workflow
         #######################################################################
 
         - name: Get permanent AWS Linux bootstrap workflow
@@ -160,6 +160,10 @@
                 aws_source_workflow_result.json.results[0].id
               }}
 
+        #######################################################################
+        # Remove any stale copy with the same temporary name
+        #######################################################################
+
         - name: Check whether temporary workflow already exists
           ansible.builtin.uri:
             url: >-
@@ -182,6 +186,14 @@
           register: existing_temporary_workflow_result
           no_log: true
 
+        - name: Fail if multiple stale temporary workflows were found
+          ansible.builtin.fail:
+            msg: >-
+              Multiple workflows named {{ aws_temporary_workflow_name }}
+              were found. Remove the duplicates before retrying.
+          when:
+            - existing_temporary_workflow_result.json.count | int > 1
+
         - name: Delete stale temporary workflow from a previous failed run
           ansible.builtin.uri:
             url: >-
@@ -203,16 +215,12 @@
               - 202
               - 204
           when:
-            - existing_temporary_workflow_result.json.count == 1
+            - existing_temporary_workflow_result.json.count | int == 1
           no_log: true
 
-        - name: Fail if multiple stale temporary workflows were found
-          ansible.builtin.fail:
-            msg: >-
-              Multiple workflows named {{ aws_temporary_workflow_name }}
-              were found. Remove the duplicates before retrying.
-          when:
-            - existing_temporary_workflow_result.json.count | int > 1
+        #######################################################################
+        # Copy the permanent workflow
+        #######################################################################
 
         - name: Copy permanent AWS Linux bootstrap workflow
           ansible.builtin.uri:
@@ -289,31 +297,6 @@
               The copied workflow {{ aws_temporary_workflow_name }}
               does not contain any workflow nodes.
 
-        - name: Read unified template for each copied workflow node
-          ansible.builtin.uri:
-            url: >-
-              {{
-                controller_host
-                ~ '/api/controller/v2/unified_job_templates/'
-                ~ (item.unified_job_template | string)
-                ~ '/'
-              }}
-            method: GET
-            user: "{{ controller_username }}"
-            password: "{{ controller_password }}"
-            force_basic_auth: true
-            validate_certs: false
-            return_content: true
-            status_code: 200
-          loop: "{{ aws_temporary_workflow_nodes_result.json.results }}"
-          loop_control:
-            label: "{{ item.identifier | default(item.id) }}"
-          register: aws_copied_node_template_results
-          no_log: true
-          when:
-            - item.unified_job_template is defined
-            - item.unified_job_template is not none
-
         #######################################################################
         # Select only Linux-postbuild-aws and Linux-identity-aws
         #######################################################################
@@ -330,28 +313,34 @@
                 +
                 [
                   {
-                    'node_id': item.item.id,
+                    'node_id': item.id,
                     'node_identifier': (
-                      item.item.identifier
-                      | default(item.item.id | string)
+                      item.identifier
+                      | default(item.id | string)
                     ),
-                    'job_template_id': item.json.id,
-                    'job_template_name': item.json.name
+                    'job_template_id': (
+                      item.summary_fields.unified_job_template.id
+                    ),
+                    'job_template_name': (
+                      item.summary_fields.unified_job_template.name
+                    )
                   }
                 ]
               }}
-          loop: "{{ aws_copied_node_template_results.results }}"
+          loop: "{{ aws_temporary_workflow_nodes_result.json.results }}"
           loop_control:
             label: >-
               {{
-                item.json.name
-                | default(item.item.identifier | default(item.item.id))
+                item.summary_fields.unified_job_template.name
+                | default(item.identifier | default(item.id))
               }}
           when:
-            - not (item.skipped | default(false))
-            - item.json is defined
-            - item.json.type == "job_template"
-            - item.json.name in aws_dynamic_credential_job_templates
+            - item.summary_fields is defined
+            - item.summary_fields.unified_job_template is defined
+            - item.summary_fields.unified_job_template.name is defined
+            - >-
+              item.summary_fields.unified_job_template.name
+              in aws_dynamic_credential_job_templates
 
         - name: Validate copied postbuild and identity nodes
           ansible.builtin.assert:
@@ -386,7 +375,7 @@
               }}.
 
         #######################################################################
-        # Remove any existing Machine credential from those copied nodes
+        # Read current credentials from the copied dynamic nodes
         #######################################################################
 
         - name: Get credentials assigned to copied dynamic nodes
@@ -410,6 +399,10 @@
             label: "{{ item.job_template_name }}"
           register: aws_dynamic_node_credentials
           no_log: true
+
+        #######################################################################
+        # Remove any existing Machine credential from those copied nodes
+        #######################################################################
 
         - name: Remove existing Machine credentials from copied nodes
           ansible.builtin.uri:
@@ -452,7 +445,7 @@
             - item.1.summary_fields.credential_type.kind == "ssh"
 
         #######################################################################
-        # Assign the selected Terraform credential to those two nodes
+        # Assign the selected Terraform Machine credential to those two nodes
         #######################################################################
 
         - name: Assign Terraform Machine credential to copied nodes
@@ -558,7 +551,7 @@
 
       always:
         #######################################################################
-        # Always remove the temporary workflow through the Controller API
+        # Always remove the temporary workflow
         #######################################################################
 
         - name: Delete temporary AWS Linux bootstrap workflow
