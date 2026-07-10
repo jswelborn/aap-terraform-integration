@@ -18,6 +18,19 @@
 
     aws_bootstrap_limit: "{{ aws_bootstrap_hosts | join(',') }}"
 
+    aws_temporary_workflow_target: >-
+      {{
+        (
+          aws_bootstrap_hosts | first
+        )
+        if aws_bootstrap_hosts | length == 1
+        else
+        (
+          (aws_bootstrap_hosts | length | string)
+          ~ '-hosts'
+        )
+      }}
+
     aws_temporary_workflow_name: >-
       {{
         aws_source_workflow_name
@@ -30,7 +43,7 @@
           )
         ~ '-'
         ~ (
-            aws_machine_credential_name
+            aws_temporary_workflow_target
             | lower
             | regex_replace('[^a-z0-9_-]', '-')
           )
@@ -239,11 +252,17 @@
             body_format: json
             body:
               name: "{{ aws_temporary_workflow_name }}"
-              description: >-
-                Temporary workflow copied from
-                {{ aws_source_workflow_name }} for hosts
-                {{ aws_bootstrap_limit }} using initial Machine
-                credential {{ aws_machine_credential_name }}.
+              description: |-
+                Temporary workflow copied from {{ aws_source_workflow_name }}.
+
+                Hosts:
+                {{ aws_bootstrap_hosts | join(', ') }}
+
+                Initial Machine credential:
+                {{ aws_machine_credential_name }}
+
+                Dispatcher job:
+                {{ tower_job_id | default('manual') }}
             return_content: true
             status_code: 201
           register: aws_temporary_workflow_copy_result
@@ -420,7 +439,7 @@
             validate_certs: false
             body_format: json
             body:
-              id: "{{ item.1.id }}"
+              id: "{{ item.1.id | int }}"
               disassociate: true
             status_code:
               - 200
@@ -464,8 +483,8 @@
             validate_certs: false
             body_format: json
             body:
-              id: "{{ aws_machine_credential.id }}"
-              associate: true
+              id: "{{ aws_machine_credential.id | int }}"
+            return_content: true
             status_code:
               - 200
               - 201
@@ -478,7 +497,7 @@
                 ~ ' -> '
                 ~ aws_machine_credential_name
               }}
-          no_log: true
+          register: aws_machine_credential_assignments
 
         #######################################################################
         # Confirm the copied nodes received the selected Machine credential
