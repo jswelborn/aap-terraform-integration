@@ -1,5 +1,5 @@
 ---
-- name: Dispatch AWS Linux bootstrap jobs
+- name: Launch an isolated AWS Linux bootstrap workflow
   hosts: localhost
   gather_facts: false
 
@@ -8,17 +8,33 @@
     controller_username: "{{ lookup('ansible.builtin.env', 'CONTROLLER_USERNAME') | trim }}"
     controller_password: "{{ lookup('ansible.builtin.env', 'CONTROLLER_PASSWORD') | trim }}"
 
+    controller_organization: "HTS SRE"
+
+    aws_source_workflow_name: "Linux-bootstrap-aws"
+
+    aws_dynamic_credential_job_templates:
+      - "Linux-postbuild-aws"
+      - "Linux-identity-aws"
+
     aws_bootstrap_limit: "{{ aws_bootstrap_hosts | join(',') }}"
 
-    aws_agent_job_templates:
-      - "linux-sumologic-aws"
-      - "linux-crowdstrike-aws"
-      - "linux-snowagent-aws"
-      - "linux-datadog-aws"
-      - "linux-automox-aws"
-
-    aws_agent_job_poll_retries: 180
-    aws_agent_job_poll_delay: 10
+    aws_temporary_workflow_name: >-
+      {{
+        aws_source_workflow_name
+        ~ '-temporary-'
+        ~ (
+            tower_job_id
+            | default(ansible_job_id | default('manual'), true)
+            | string
+            | regex_replace('[^A-Za-z0-9_-]', '-')
+          )
+        ~ '-'
+        ~ (
+            aws_machine_credential_name
+            | lower
+            | regex_replace('[^a-z0-9_-]', '-')
+          )
+      }}
 
   tasks:
     - name: Validate dispatcher inputs
@@ -34,7 +50,7 @@
           The dispatcher requires a non-empty aws_bootstrap_hosts list
           and aws_machine_credential_name.
 
-    - name: Validate controller connection variables
+    - name: Validate Controller connection variables
       ansible.builtin.assert:
         that:
           - controller_host | length > 0
@@ -42,163 +58,416 @@
           - controller_password | length > 0
         fail_msg: >-
           CONTROLLER_HOST, CONTROLLER_USERNAME, and CONTROLLER_PASSWORD
-          must be provided to the dispatcher job through its attached
-          AAP credential.
+          must be supplied by the attached AAP Controller credential.
       no_log: true
 
-    - name: Show AWS Linux bootstrap selection
+    - name: Show temporary workflow selection
       ansible.builtin.debug:
         msg:
+          source_workflow: "{{ aws_source_workflow_name }}"
+          temporary_workflow: "{{ aws_temporary_workflow_name }}"
           target_hosts: "{{ aws_bootstrap_hosts }}"
           limit: "{{ aws_bootstrap_limit }}"
-          initial_machine_credential: "{{ aws_machine_credential_name }}"
-          postbuild_template: "linux-postbuild-aws"
-          identity_template: "linux-identity-aws"
-          agent_templates: "{{ aws_agent_job_templates }}"
+          terraform_machine_credential: "{{ aws_machine_credential_name }}"
+          dynamically_updated_nodes: "{{ aws_dynamic_credential_job_templates }}"
 
-    ###########################################################################
-    # Stage 1
-    # Connect with the EC2 key-pair credential and perform initial post-build.
-    ###########################################################################
+    - name: Create and launch isolated AWS Linux workflow
+      block:
+        #######################################################################
+        # Look up the selected Terraform Machine credential
+        #######################################################################
 
-    - name: Launch AWS Linux post-build job
-      ansible.controller.job_launch:
-        job_template: "linux-postbuild-aws"
-        limit: "{{ aws_bootstrap_limit }}"
-        credentials:
-          - "{{ aws_machine_credential_name }}"
-        wait: true
-        request_timeout: 30
-      register: aws_postbuild_job
+        - name: Get selected AAP Machine credential
+          ansible.builtin.uri:
+            url: >-
+              {{
+                controller_host
+                ~ '/api/controller/v2/credentials/'
+                ~ '?name='
+                ~ (aws_machine_credential_name | urlencode)
+                ~ '&credential_type__kind=ssh'
+                ~ '&organization__name='
+                ~ (controller_organization | urlencode)
+                ~ '&page_size=2'
+              }}
+            method: GET
+            user: "{{ controller_username }}"
+            password: "{{ controller_password }}"
+            force_basic_auth: true
+            validate_certs: false
+            return_content: true
+            status_code: 200
+          register: aws_machine_credential_result
+          no_log: true
 
-    - name: Show AWS Linux post-build completion
-      ansible.builtin.debug:
-        msg: >-
-          linux-postbuild-aws completed successfully for
-          {{ aws_bootstrap_limit }} using
-          {{ aws_machine_credential_name }}.
+        - name: Validate selected AAP Machine credential
+          ansible.builtin.assert:
+            that:
+              - aws_machine_credential_result.json.count == 1
+            fail_msg: >-
+              Expected exactly one AAP Machine credential named
+              {{ aws_machine_credential_name }} in organization
+              {{ controller_organization }}, but Controller returned
+              {{ aws_machine_credential_result.json.count }}.
 
-    ###########################################################################
-    # Stage 2
-    # Continue using the EC2 key-pair credential while configuring hetroot.
-    ###########################################################################
+        - name: Set selected AAP Machine credential
+          ansible.builtin.set_fact:
+            aws_machine_credential: >-
+              {{
+                aws_machine_credential_result.json.results[0]
+              }}
 
-    - name: Launch AWS Linux identity job
-      ansible.controller.job_launch:
-        job_template: "linux-identity-aws"
-        limit: "{{ aws_bootstrap_limit }}"
-        credentials:
-          - "{{ aws_machine_credential_name }}"
-        wait: true
-        request_timeout: 30
-      register: aws_identity_job
+        #######################################################################
+        # Copy the permanent workflow
+        #######################################################################
 
-    - name: Show AWS Linux identity completion
-      ansible.builtin.debug:
-        msg: >-
-          linux-identity-aws completed successfully for
-          {{ aws_bootstrap_limit }}. Downstream jobs will now use
-          their existing hetroot Machine credential.
+        - name: Copy permanent AWS Linux bootstrap workflow
+          ansible.controller.workflow_job_template:
+            name: "{{ aws_temporary_workflow_name }}"
+            copy_from: "{{ aws_source_workflow_name }}"
+            organization: "{{ controller_organization }}"
+            description: >-
+              Temporary workflow copied from {{ aws_source_workflow_name }}
+              for hosts {{ aws_bootstrap_limit }} using initial Machine
+              credential {{ aws_machine_credential_name }}.
+            state: present
 
-    ###########################################################################
-    # Stage 3
-    # Launch service jobs concurrently.
-    #
-    # No credentials are passed here. Each job template continues to use its
-    # existing attached hetroot Machine credential.
-    ###########################################################################
+        - name: Get temporary workflow template
+          ansible.builtin.uri:
+            url: >-
+              {{
+                controller_host
+                ~ '/api/controller/v2/workflow_job_templates/'
+                ~ '?name='
+                ~ (aws_temporary_workflow_name | urlencode)
+                ~ '&organization__name='
+                ~ (controller_organization | urlencode)
+                ~ '&page_size=2'
+              }}
+            method: GET
+            user: "{{ controller_username }}"
+            password: "{{ controller_password }}"
+            force_basic_auth: true
+            validate_certs: false
+            return_content: true
+            status_code: 200
+          register: aws_temporary_workflow_result
+          no_log: true
 
-    - name: Launch AWS Linux service jobs in parallel
-      ansible.controller.job_launch:
-        job_template: "{{ item }}"
-        limit: "{{ aws_bootstrap_limit }}"
-        wait: false
-        request_timeout: 30
-      loop: "{{ aws_agent_job_templates }}"
-      loop_control:
-        label: "{{ item }}"
-      register: aws_agent_job_launches
+        - name: Validate temporary workflow lookup
+          ansible.builtin.assert:
+            that:
+              - aws_temporary_workflow_result.json.count == 1
+            fail_msg: >-
+              Expected exactly one temporary workflow named
+              {{ aws_temporary_workflow_name }}, but Controller returned
+              {{ aws_temporary_workflow_result.json.count }}.
 
-    - name: Initialize launched service job list
-      ansible.builtin.set_fact:
-        aws_agent_jobs: []
+        - name: Set temporary workflow ID
+          ansible.builtin.set_fact:
+            aws_temporary_workflow_id: >-
+              {{
+                aws_temporary_workflow_result.json.results[0].id
+              }}
 
-    - name: Record launched AWS Linux service jobs
-      ansible.builtin.set_fact:
-        aws_agent_jobs: >-
-          {{
-            aws_agent_jobs
-            +
-            [
-              {
-                'template': item.item,
-                'job_id': item.id
-              }
-            ]
-          }}
-      loop: "{{ aws_agent_job_launches.results }}"
-      loop_control:
-        label: "{{ item.item }} -> job {{ item.id }}"
+        #######################################################################
+        # Read all copied workflow nodes
+        #######################################################################
 
-    - name: Show launched AWS Linux service jobs
-      ansible.builtin.debug:
-        var: aws_agent_jobs
+        - name: Get copied workflow nodes
+          ansible.builtin.uri:
+            url: >-
+              {{
+                controller_host
+                ~ '/api/controller/v2/workflow_job_template_nodes/'
+                ~ '?workflow_job_template='
+                ~ (aws_temporary_workflow_id | string)
+                ~ '&page_size=200'
+              }}
+            method: GET
+            user: "{{ controller_username }}"
+            password: "{{ controller_password }}"
+            force_basic_auth: true
+            validate_certs: false
+            return_content: true
+            status_code: 200
+          register: aws_temporary_workflow_nodes_result
+          no_log: true
 
-    - name: Wait for AWS Linux service jobs to finish
-      ansible.builtin.uri:
-        url: "{{ controller_host }}/api/controller/v2/jobs/{{ item.job_id }}/"
-        method: GET
-        user: "{{ controller_username }}"
-        password: "{{ controller_password }}"
-        force_basic_auth: true
-        validate_certs: false
-        return_content: true
-        status_code: 200
-      register: aws_agent_job_status
-      until:
-        - aws_agent_job_status.json.status is defined
-        - >-
-          aws_agent_job_status.json.status in
-          [
-            'successful',
-            'failed',
-            'error',
-            'canceled'
-          ]
-      retries: "{{ aws_agent_job_poll_retries }}"
-      delay: "{{ aws_agent_job_poll_delay }}"
-      loop: "{{ aws_agent_jobs }}"
-      loop_control:
-        label: "{{ item.template }} -> job {{ item.job_id }}"
-      no_log: true
+        - name: Read unified template for each copied workflow node
+          ansible.builtin.uri:
+            url: >-
+              {{
+                controller_host
+                ~ '/api/controller/v2/unified_job_templates/'
+                ~ (item.unified_job_template | string)
+                ~ '/'
+              }}
+            method: GET
+            user: "{{ controller_username }}"
+            password: "{{ controller_password }}"
+            force_basic_auth: true
+            validate_certs: false
+            return_content: true
+            status_code: 200
+          loop: "{{ aws_temporary_workflow_nodes_result.json.results }}"
+          loop_control:
+            label: "{{ item.identifier | default(item.id) }}"
+          register: aws_copied_node_template_results
+          no_log: true
+          when:
+            - item.unified_job_template is defined
+            - item.unified_job_template is not none
 
-    - name: Fail if an AWS Linux service job did not succeed
-      ansible.builtin.assert:
-        that:
-          - item.json.status == "successful"
-        fail_msg: >-
-          {{ item.item.template }} did not complete successfully for
-          {{ aws_bootstrap_limit }}.
+        #######################################################################
+        # Select only postbuild and identity
+        #######################################################################
 
-          Final status: {{ item.json.status }}
-          Controller job ID: {{ item.item.job_id }}
-        success_msg: >-
-          {{ item.item.template }} completed successfully.
-      loop: "{{ aws_agent_job_status.results }}"
-      loop_control:
-        label: "{{ item.item.template }} -> {{ item.json.status }}"
+        - name: Initialize dynamic credential workflow nodes
+          ansible.builtin.set_fact:
+            aws_dynamic_credential_nodes: []
 
-    - name: Show AWS Linux bootstrap completion
-      ansible.builtin.debug:
-        msg:
-          target_hosts: "{{ aws_bootstrap_hosts }}"
-          initial_machine_credential: "{{ aws_machine_credential_name }}"
-          postbuild: "successful"
-          identity: "successful"
-          service_jobs: >-
+        - name: Select copied postbuild and identity nodes
+          ansible.builtin.set_fact:
+            aws_dynamic_credential_nodes: >-
+              {{
+                aws_dynamic_credential_nodes
+                +
+                [
+                  {
+                    'node_id': item.item.id,
+                    'node_identifier': (
+                      item.item.identifier
+                      | default(item.item.id | string)
+                    ),
+                    'job_template_id': item.json.id,
+                    'job_template_name': item.json.name
+                  }
+                ]
+              }}
+          loop: "{{ aws_copied_node_template_results.results }}"
+          loop_control:
+            label: >-
+              {{
+                item.json.name
+                | default(item.item.identifier | default(item.item.id))
+              }}
+          when:
+            - not (item.skipped | default(false))
+            - item.json is defined
+            - item.json.type == "job_template"
+            - item.json.name in aws_dynamic_credential_job_templates
+
+        - name: Validate copied postbuild and identity nodes
+          ansible.builtin.assert:
+            that:
+              - aws_dynamic_credential_nodes | length == 2
+              - >-
+                aws_dynamic_credential_nodes
+                | selectattr(
+                    'job_template_name',
+                    'equalto',
+                    'Linux-postbuild-aws'
+                  )
+                | list
+                | length == 1
+              - >-
+                aws_dynamic_credential_nodes
+                | selectattr(
+                    'job_template_name',
+                    'equalto',
+                    'Linux-identity-aws'
+                  )
+                | list
+                | length == 1
+            fail_msg: >-
+              The copied workflow must contain exactly one
+              Linux-postbuild-aws node and exactly one
+              Linux-identity-aws node. Found:
+              {{
+                aws_dynamic_credential_nodes
+                | map(attribute='job_template_name')
+                | list
+              }}.
+
+        #######################################################################
+        # Remove existing Machine credentials only from those two copied nodes
+        #######################################################################
+
+        - name: Get credentials assigned to copied postbuild and identity nodes
+          ansible.builtin.uri:
+            url: >-
+              {{
+                controller_host
+                ~ '/api/controller/v2/workflow_job_template_nodes/'
+                ~ (item.node_id | string)
+                ~ '/credentials/?page_size=200'
+              }}
+            method: GET
+            user: "{{ controller_username }}"
+            password: "{{ controller_password }}"
+            force_basic_auth: true
+            validate_certs: false
+            return_content: true
+            status_code: 200
+          loop: "{{ aws_dynamic_credential_nodes }}"
+          loop_control:
+            label: "{{ item.job_template_name }}"
+          register: aws_dynamic_node_credentials
+          no_log: true
+
+        - name: Remove existing Machine credentials from copied nodes
+          ansible.builtin.uri:
+            url: >-
+              {{
+                controller_host
+                ~ '/api/controller/v2/workflow_job_template_nodes/'
+                ~ (item.0.item.node_id | string)
+                ~ '/credentials/'
+              }}
+            method: POST
+            user: "{{ controller_username }}"
+            password: "{{ controller_password }}"
+            force_basic_auth: true
+            validate_certs: false
+            body_format: json
+            body:
+              id: "{{ item.1.id }}"
+              disassociate: true
+            status_code:
+              - 200
+              - 201
+              - 204
+          loop: >-
             {{
-              aws_agent_job_status.results
-              | map(attribute='item.template')
-              | list
+              aws_dynamic_node_credentials.results
+              | subelements('json.results', skip_missing=True)
             }}
-          result: "AWS Linux bootstrap completed successfully"
+          loop_control:
+            label: >-
+              {{
+                item.0.item.job_template_name
+                ~ ' -> '
+                ~ item.1.name
+              }}
+          no_log: true
+          when:
+            - item.1.summary_fields is defined
+            - item.1.summary_fields.credential_type is defined
+            - item.1.summary_fields.credential_type.kind == "ssh"
+
+        #######################################################################
+        # Assign the Terraform-selected credential to only those two nodes
+        #######################################################################
+
+        - name: Assign Terraform Machine credential to copied nodes
+          ansible.builtin.uri:
+            url: >-
+              {{
+                controller_host
+                ~ '/api/controller/v2/workflow_job_template_nodes/'
+                ~ (item.node_id | string)
+                ~ '/credentials/'
+              }}
+            method: POST
+            user: "{{ controller_username }}"
+            password: "{{ controller_password }}"
+            force_basic_auth: true
+            validate_certs: false
+            body_format: json
+            body:
+              id: "{{ aws_machine_credential.id }}"
+              associate: true
+            status_code:
+              - 200
+              - 201
+              - 204
+          loop: "{{ aws_dynamic_credential_nodes }}"
+          loop_control:
+            label: >-
+              {{
+                item.job_template_name
+                ~ ' -> '
+                ~ aws_machine_credential_name
+              }}
+          no_log: true
+
+        #######################################################################
+        # Confirm the two copied nodes received the selected credential
+        #######################################################################
+
+        - name: Read updated credentials from copied nodes
+          ansible.builtin.uri:
+            url: >-
+              {{
+                controller_host
+                ~ '/api/controller/v2/workflow_job_template_nodes/'
+                ~ (item.node_id | string)
+                ~ '/credentials/?page_size=200'
+              }}
+            method: GET
+            user: "{{ controller_username }}"
+            password: "{{ controller_password }}"
+            force_basic_auth: true
+            validate_certs: false
+            return_content: true
+            status_code: 200
+          loop: "{{ aws_dynamic_credential_nodes }}"
+          loop_control:
+            label: "{{ item.job_template_name }}"
+          register: aws_updated_node_credentials
+          no_log: true
+
+        - name: Validate Terraform credential assignment on copied nodes
+          ansible.builtin.assert:
+            that:
+              - >-
+                item.json.results
+                | selectattr(
+                    'id',
+                    'equalto',
+                    aws_machine_credential.id
+                  )
+                | list
+                | length == 1
+            fail_msg: >-
+              The copied {{ item.item.job_template_name }} node did not
+              receive Machine credential {{ aws_machine_credential_name }}.
+            success_msg: >-
+              The copied {{ item.item.job_template_name }} node received
+              Machine credential {{ aws_machine_credential_name }}.
+          loop: "{{ aws_updated_node_credentials.results }}"
+          loop_control:
+            label: "{{ item.item.job_template_name }}"
+
+        #######################################################################
+        # Launch the copied workflow
+        #######################################################################
+
+        - name: Launch temporary AWS Linux bootstrap workflow
+          ansible.controller.workflow_launch:
+            workflow_template: "{{ aws_temporary_workflow_name }}"
+            organization: "{{ controller_organization }}"
+            limit: "{{ aws_bootstrap_limit }}"
+            wait: true
+            request_timeout: 30
+          register: aws_temporary_workflow_launch
+
+        - name: Show successful temporary workflow completion
+          ansible.builtin.debug:
+            msg:
+              workflow: "{{ aws_temporary_workflow_name }}"
+              hosts: "{{ aws_bootstrap_hosts }}"
+              initial_machine_credential: "{{ aws_machine_credential_name }}"
+              result: "AWS Linux bootstrap completed successfully"
+
+      always:
+        #######################################################################
+        # Always remove the temporary workflow
+        #######################################################################
+
+        - name: Delete temporary AWS Linux bootstrap workflow
+          ansible.controller.workflow_job_template:
+            name: "{{ aws_temporary_workflow_name }}"
+            organization: "{{ controller_organization }}"
+            state: absent
