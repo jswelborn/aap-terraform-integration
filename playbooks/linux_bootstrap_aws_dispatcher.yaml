@@ -9,7 +9,6 @@
     controller_password: "{{ lookup('ansible.builtin.env', 'CONTROLLER_PASSWORD') | trim }}"
 
     controller_organization: "HTS SRE"
-
     aws_source_workflow_name: "Linux-bootstrap-aws"
 
     aws_dynamic_credential_job_templates:
@@ -20,9 +19,7 @@
 
     aws_temporary_workflow_target: >-
       {{
-        (
-          aws_bootstrap_hosts | first
-        )
+        (aws_bootstrap_hosts | first)
         if aws_bootstrap_hosts | length == 1
         else
         (
@@ -116,7 +113,7 @@
         - name: Validate selected AAP Machine credential
           ansible.builtin.assert:
             that:
-              - aws_machine_credential_result.json.count == 1
+              - aws_machine_credential_result.json.count | int == 1
             fail_msg: >-
               Expected exactly one AAP Machine credential named
               {{ aws_machine_credential_name }} in organization
@@ -129,6 +126,17 @@
               {{
                 aws_machine_credential_result.json.results[0]
               }}
+            aws_machine_credential_id: >-
+              {{
+                aws_machine_credential_result.json.results[0].id | int
+              }}
+
+        - name: Show selected credential details
+          ansible.builtin.debug:
+            msg:
+              credential_name: "{{ aws_machine_credential.name }}"
+              credential_id: "{{ aws_machine_credential_id }}"
+              credential_id_type: "{{ aws_machine_credential_id | type_debug }}"
 
         #######################################################################
         # Locate the permanent workflow
@@ -159,7 +167,7 @@
         - name: Validate permanent workflow lookup
           ansible.builtin.assert:
             that:
-              - aws_source_workflow_result.json.count == 1
+              - aws_source_workflow_result.json.count | int == 1
             fail_msg: >-
               Expected exactly one workflow named
               {{ aws_source_workflow_name }} in organization
@@ -170,11 +178,11 @@
           ansible.builtin.set_fact:
             aws_source_workflow_id: >-
               {{
-                aws_source_workflow_result.json.results[0].id
+                aws_source_workflow_result.json.results[0].id | int
               }}
 
         #######################################################################
-        # Remove any stale copy with the same temporary name
+        # Remove a stale temporary copy with the same name
         #######################################################################
 
         - name: Check whether temporary workflow already exists
@@ -272,7 +280,7 @@
           ansible.builtin.set_fact:
             aws_temporary_workflow_id: >-
               {{
-                aws_temporary_workflow_copy_result.json.id
+                aws_temporary_workflow_copy_result.json.id | int
               }}
 
         - name: Validate temporary workflow copy response
@@ -332,13 +340,13 @@
                 +
                 [
                   {
-                    'node_id': item.id,
+                    'node_id': item.id | int,
                     'node_identifier': (
                       item.identifier
                       | default(item.id | string)
                     ),
                     'job_template_id': (
-                      item.summary_fields.unified_job_template.id
+                      item.summary_fields.unified_job_template.id | int
                     ),
                     'job_template_name': (
                       item.summary_fields.unified_job_template.name
@@ -393,8 +401,18 @@
                 | list
               }}.
 
+        - name: Show copied dynamic workflow nodes
+          ansible.builtin.debug:
+            msg:
+              job_template_name: "{{ item.job_template_name }}"
+              node_id: "{{ item.node_id }}"
+              node_id_type: "{{ item.node_id | type_debug }}"
+          loop: "{{ aws_dynamic_credential_nodes }}"
+          loop_control:
+            label: "{{ item.job_template_name }}"
+
         #######################################################################
-        # Read current credentials from the copied dynamic nodes
+        # Read credentials currently assigned to the copied nodes
         #######################################################################
 
         - name: Get credentials assigned to copied dynamic nodes
@@ -420,7 +438,7 @@
           no_log: true
 
         #######################################################################
-        # Remove any existing Machine credential from those copied nodes
+        # Remove existing Machine credentials only
         #######################################################################
 
         - name: Remove existing Machine credentials from copied nodes
@@ -437,10 +455,13 @@
             password: "{{ controller_password }}"
             force_basic_auth: true
             validate_certs: false
-            body_format: json
-            body:
-              id: "{{ item.1.id | int }}"
-              disassociate: true
+            headers:
+              Content-Type: application/json
+            body: >-
+              {
+                "id": {{ item.1.id | int }},
+                "disassociate": true
+              }
             status_code:
               - 200
               - 201
@@ -464,7 +485,10 @@
             - item.1.summary_fields.credential_type.kind == "ssh"
 
         #######################################################################
-        # Assign the selected Terraform Machine credential to those two nodes
+        # Assign the selected Terraform Machine credential
+        #
+        # A raw JSON string is intentional. It guarantees that "id" is sent
+        # as a JSON integer, matching the request generated by the AAP UI.
         #######################################################################
 
         - name: Assign Terraform Machine credential to copied nodes
@@ -481,9 +505,10 @@
             password: "{{ controller_password }}"
             force_basic_auth: true
             validate_certs: false
-            body_format: json
-            body:
-              id: "{{ aws_machine_credential.id | int }}"
+            headers:
+              Content-Type: application/json
+            body: >-
+              {"id": {{ aws_machine_credential_id | int }}}
             return_content: true
             status_code:
               - 200
@@ -500,7 +525,7 @@
           register: aws_machine_credential_assignments
 
         #######################################################################
-        # Confirm the copied nodes received the selected Machine credential
+        # Confirm both copied nodes received the selected credential
         #######################################################################
 
         - name: Read updated credentials from copied nodes
@@ -533,7 +558,7 @@
                 | selectattr(
                     'id',
                     'equalto',
-                    aws_machine_credential.id
+                    aws_machine_credential_id
                   )
                 | list
                 | length == 1
