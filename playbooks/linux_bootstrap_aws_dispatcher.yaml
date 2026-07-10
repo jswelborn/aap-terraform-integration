@@ -182,7 +182,7 @@
               }}
 
         #######################################################################
-        # Remove a stale temporary copy with the same name
+        # Remove a stale temporary workflow with the same name
         #######################################################################
 
         - name: Check whether temporary workflow already exists
@@ -457,29 +457,22 @@
         #######################################################################
 
         - name: Remove existing Machine credentials from copied nodes
-          ansible.builtin.command:
-            argv:
-              - curl
-              - --silent
-              - --show-error
-              - --fail-with-body
-              - --insecure
-              - --request
-              - POST
-              - --user
-              - "{{ controller_username }}:{{ controller_password }}"
-              - --header
-              - "Content-Type: application/json"
-              - --data-binary
-              - >-
-                {"id":{{ item.1.id | int }},"disassociate":true}
-              - >-
-                {{
-                  controller_host
-                  ~ '/api/controller/v2/workflow_job_template_nodes/'
-                  ~ (item.0.item.node_id | string)
-                  ~ '/credentials/'
-                }}
+          ansible.builtin.shell: |
+            curl \
+              --silent \
+              --show-error \
+              --fail-with-body \
+              --insecure \
+              --request POST \
+              --user "${CONTROLLER_USERNAME}:${CONTROLLER_PASSWORD}" \
+              --header "Content-Type: application/json" \
+              --data-binary '{"id":{{ item.1.id | int }},"disassociate":true}' \
+              "{{ controller_host }}/api/controller/v2/workflow_job_template_nodes/{{ item.0.item.node_id }}/credentials/"
+          args:
+            executable: /bin/bash
+          environment:
+            CONTROLLER_USERNAME: "{{ controller_username }}"
+            CONTROLLER_PASSWORD: "{{ controller_password }}"
           loop: >-
             {{
               aws_dynamic_node_credentials.results
@@ -492,41 +485,77 @@
                 ~ ' -> '
                 ~ item.1.name
               }}
-          changed_when: true
-          no_log: true
+          register: aws_machine_credential_removals
+          changed_when: false
+          failed_when: false
           when:
             - item.1.summary_fields is defined
             - item.1.summary_fields.credential_type is defined
             - item.1.summary_fields.credential_type.kind == "ssh"
+
+        - name: Show Machine credential removal results
+          ansible.builtin.debug:
+            msg:
+              node: "{{ item.item.0.item.job_template_name }}"
+              credential: "{{ item.item.1.name }}"
+              return_code: "{{ item.rc }}"
+              response: "{{ item.stdout | default('') }}"
+              error: "{{ item.stderr | default('') }}"
+          loop: "{{ aws_machine_credential_removals.results | default([]) }}"
+          loop_control:
+            label: >-
+              {{
+                item.item.0.item.job_template_name
+                ~ ' -> '
+                ~ item.item.1.name
+              }}
+          when:
+            - not (item.skipped | default(false))
+
+        - name: Fail if an existing Machine credential could not be removed
+          ansible.builtin.assert:
+            that:
+              - item.rc == 0
+            fail_msg: >-
+              Failed to remove Machine credential
+              {{ item.item.1.name }} from copied
+              {{ item.item.0.item.job_template_name }} node.
+
+              curl return code: {{ item.rc }}
+              API response: {{ item.stdout | default('') }}
+              curl error: {{ item.stderr | default('') }}
+          loop: "{{ aws_machine_credential_removals.results | default([]) }}"
+          loop_control:
+            label: >-
+              {{
+                item.item.0.item.job_template_name
+                ~ ' -> '
+                ~ item.item.1.name
+              }}
+          when:
+            - not (item.skipped | default(false))
 
         #######################################################################
         # Assign selected Terraform Machine credential with curl
         #######################################################################
 
         - name: Assign Terraform Machine credential to copied nodes
-          ansible.builtin.command:
-            argv:
-              - curl
-              - --silent
-              - --show-error
-              - --fail-with-body
-              - --insecure
-              - --request
-              - POST
-              - --user
-              - "{{ controller_username }}:{{ controller_password }}"
-              - --header
-              - "Content-Type: application/json"
-              - --data-binary
-              - >-
-                {"id":{{ aws_machine_credential.id | int }}}
-              - >-
-                {{
-                  controller_host
-                  ~ '/api/controller/v2/workflow_job_template_nodes/'
-                  ~ (item.node_id | string)
-                  ~ '/credentials/'
-                }}
+          ansible.builtin.shell: |
+            curl \
+              --silent \
+              --show-error \
+              --fail-with-body \
+              --insecure \
+              --request POST \
+              --user "${CONTROLLER_USERNAME}:${CONTROLLER_PASSWORD}" \
+              --header "Content-Type: application/json" \
+              --data-binary '{"id":{{ aws_machine_credential.id | int }}}' \
+              "{{ controller_host }}/api/controller/v2/workflow_job_template_nodes/{{ item.node_id }}/credentials/"
+          args:
+            executable: /bin/bash
+          environment:
+            CONTROLLER_USERNAME: "{{ controller_username }}"
+            CONTROLLER_PASSWORD: "{{ controller_password }}"
           loop: "{{ aws_dynamic_credential_nodes }}"
           loop_control:
             label: >-
@@ -536,11 +565,50 @@
                 ~ aws_machine_credential_name
               }}
           register: aws_machine_credential_assignments
-          changed_when: true
-          no_log: true
+          changed_when: false
+          failed_when: false
+
+        - name: Show Machine credential assignment results
+          ansible.builtin.debug:
+            msg:
+              node: "{{ item.item.job_template_name }}"
+              credential: "{{ aws_machine_credential_name }}"
+              credential_id: "{{ aws_machine_credential.id }}"
+              return_code: "{{ item.rc }}"
+              response: "{{ item.stdout | default('') }}"
+              error: "{{ item.stderr | default('') }}"
+          loop: "{{ aws_machine_credential_assignments.results }}"
+          loop_control:
+            label: >-
+              {{
+                item.item.job_template_name
+                ~ ' -> '
+                ~ aws_machine_credential_name
+              }}
+
+        - name: Fail if the Terraform Machine credential could not be assigned
+          ansible.builtin.assert:
+            that:
+              - item.rc == 0
+            fail_msg: >-
+              Failed to assign Machine credential
+              {{ aws_machine_credential_name }} to copied
+              {{ item.item.job_template_name }} node.
+
+              curl return code: {{ item.rc }}
+              API response: {{ item.stdout | default('') }}
+              curl error: {{ item.stderr | default('') }}
+          loop: "{{ aws_machine_credential_assignments.results }}"
+          loop_control:
+            label: >-
+              {{
+                item.item.job_template_name
+                ~ ' -> '
+                ~ aws_machine_credential_name
+              }}
 
         #######################################################################
-        # Confirm both copied nodes received the selected credential
+        # Confirm both nodes received the selected credential
         #######################################################################
 
         - name: Read updated credentials from copied nodes
