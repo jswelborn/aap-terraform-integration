@@ -1,0 +1,204 @@
+---
+- name: Dispatch AWS Linux bootstrap jobs
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    controller_host: "{{ lookup('ansible.builtin.env', 'CONTROLLER_HOST') | trim }}"
+    controller_username: "{{ lookup('ansible.builtin.env', 'CONTROLLER_USERNAME') | trim }}"
+    controller_password: "{{ lookup('ansible.builtin.env', 'CONTROLLER_PASSWORD') | trim }}"
+
+    aws_bootstrap_limit: "{{ aws_bootstrap_hosts | join(',') }}"
+
+    aws_agent_job_templates:
+      - "linux-sumologic-aws"
+      - "linux-crowdstrike-aws"
+      - "linux-snowagent-aws"
+      - "linux-datadog-aws"
+      - "linux-automox-aws"
+
+    aws_agent_job_poll_retries: 180
+    aws_agent_job_poll_delay: 10
+
+  tasks:
+    - name: Validate dispatcher inputs
+      ansible.builtin.assert:
+        that:
+          - aws_bootstrap_hosts is defined
+          - aws_bootstrap_hosts is sequence
+          - aws_bootstrap_hosts is not string
+          - aws_bootstrap_hosts | length > 0
+          - aws_machine_credential_name is defined
+          - aws_machine_credential_name | string | trim | length > 0
+        fail_msg: >-
+          The dispatcher requires a non-empty aws_bootstrap_hosts list
+          and aws_machine_credential_name.
+
+    - name: Validate controller connection variables
+      ansible.builtin.assert:
+        that:
+          - controller_host | length > 0
+          - controller_username | length > 0
+          - controller_password | length > 0
+        fail_msg: >-
+          CONTROLLER_HOST, CONTROLLER_USERNAME, and CONTROLLER_PASSWORD
+          must be provided to the dispatcher job through its attached
+          AAP credential.
+      no_log: true
+
+    - name: Show AWS Linux bootstrap selection
+      ansible.builtin.debug:
+        msg:
+          target_hosts: "{{ aws_bootstrap_hosts }}"
+          limit: "{{ aws_bootstrap_limit }}"
+          initial_machine_credential: "{{ aws_machine_credential_name }}"
+          postbuild_template: "linux-postbuild-aws"
+          identity_template: "linux-identity-aws"
+          agent_templates: "{{ aws_agent_job_templates }}"
+
+    ###########################################################################
+    # Stage 1
+    # Connect with the EC2 key-pair credential and perform initial post-build.
+    ###########################################################################
+
+    - name: Launch AWS Linux post-build job
+      ansible.controller.job_launch:
+        job_template: "linux-postbuild-aws"
+        limit: "{{ aws_bootstrap_limit }}"
+        credentials:
+          - "{{ aws_machine_credential_name }}"
+        wait: true
+        request_timeout: 30
+      register: aws_postbuild_job
+
+    - name: Show AWS Linux post-build completion
+      ansible.builtin.debug:
+        msg: >-
+          linux-postbuild-aws completed successfully for
+          {{ aws_bootstrap_limit }} using
+          {{ aws_machine_credential_name }}.
+
+    ###########################################################################
+    # Stage 2
+    # Continue using the EC2 key-pair credential while configuring hetroot.
+    ###########################################################################
+
+    - name: Launch AWS Linux identity job
+      ansible.controller.job_launch:
+        job_template: "linux-identity-aws"
+        limit: "{{ aws_bootstrap_limit }}"
+        credentials:
+          - "{{ aws_machine_credential_name }}"
+        wait: true
+        request_timeout: 30
+      register: aws_identity_job
+
+    - name: Show AWS Linux identity completion
+      ansible.builtin.debug:
+        msg: >-
+          linux-identity-aws completed successfully for
+          {{ aws_bootstrap_limit }}. Downstream jobs will now use
+          their existing hetroot Machine credential.
+
+    ###########################################################################
+    # Stage 3
+    # Launch service jobs concurrently.
+    #
+    # No credentials are passed here. Each job template continues to use its
+    # existing attached hetroot Machine credential.
+    ###########################################################################
+
+    - name: Launch AWS Linux service jobs in parallel
+      ansible.controller.job_launch:
+        job_template: "{{ item }}"
+        limit: "{{ aws_bootstrap_limit }}"
+        wait: false
+        request_timeout: 30
+      loop: "{{ aws_agent_job_templates }}"
+      loop_control:
+        label: "{{ item }}"
+      register: aws_agent_job_launches
+
+    - name: Initialize launched service job list
+      ansible.builtin.set_fact:
+        aws_agent_jobs: []
+
+    - name: Record launched AWS Linux service jobs
+      ansible.builtin.set_fact:
+        aws_agent_jobs: >-
+          {{
+            aws_agent_jobs
+            +
+            [
+              {
+                'template': item.item,
+                'job_id': item.id
+              }
+            ]
+          }}
+      loop: "{{ aws_agent_job_launches.results }}"
+      loop_control:
+        label: "{{ item.item }} -> job {{ item.id }}"
+
+    - name: Show launched AWS Linux service jobs
+      ansible.builtin.debug:
+        var: aws_agent_jobs
+
+    - name: Wait for AWS Linux service jobs to finish
+      ansible.builtin.uri:
+        url: "{{ controller_host }}/api/controller/v2/jobs/{{ item.job_id }}/"
+        method: GET
+        user: "{{ controller_username }}"
+        password: "{{ controller_password }}"
+        force_basic_auth: true
+        validate_certs: false
+        return_content: true
+        status_code: 200
+      register: aws_agent_job_status
+      until:
+        - aws_agent_job_status.json.status is defined
+        - >-
+          aws_agent_job_status.json.status in
+          [
+            'successful',
+            'failed',
+            'error',
+            'canceled'
+          ]
+      retries: "{{ aws_agent_job_poll_retries }}"
+      delay: "{{ aws_agent_job_poll_delay }}"
+      loop: "{{ aws_agent_jobs }}"
+      loop_control:
+        label: "{{ item.template }} -> job {{ item.job_id }}"
+      no_log: true
+
+    - name: Fail if an AWS Linux service job did not succeed
+      ansible.builtin.assert:
+        that:
+          - item.json.status == "successful"
+        fail_msg: >-
+          {{ item.item.template }} did not complete successfully for
+          {{ aws_bootstrap_limit }}.
+
+          Final status: {{ item.json.status }}
+          Controller job ID: {{ item.item.job_id }}
+        success_msg: >-
+          {{ item.item.template }} completed successfully.
+      loop: "{{ aws_agent_job_status.results }}"
+      loop_control:
+        label: "{{ item.item.template }} -> {{ item.json.status }}"
+
+    - name: Show AWS Linux bootstrap completion
+      ansible.builtin.debug:
+        msg:
+          target_hosts: "{{ aws_bootstrap_hosts }}"
+          initial_machine_credential: "{{ aws_machine_credential_name }}"
+          postbuild: "successful"
+          identity: "successful"
+          service_jobs: >-
+            {{
+              aws_agent_job_status.results
+              | map(attribute='item.template')
+              | list
+            }}
+          result: "AWS Linux bootstrap completed successfully"
