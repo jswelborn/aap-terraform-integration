@@ -136,12 +136,14 @@
       loop: "{{ azure_inventory_sources_result.json.results }}"
       loop_control:
         label: "{{ item.name }}"
+      vars:
+        parsed_source_vars: "{{ item.source_vars | default('{}') | from_yaml }}"
       when:
           - azure_subscription_id is defined
           - item.source_vars is defined
-          - item.source_vars.aap_subscription_id is defined
+          - parsed_source_vars.aap_subscription_id is defined
           - >
-            (item.source_vars.aap_subscription_id | string | lower)
+            (parsed_source_vars.aap_subscription_id | string | lower)
             ==
             (azure_subscription_id | string | lower)
 
