@@ -121,30 +121,29 @@
       when:
         - azure_subscription_id is defined
 
-    - name: Show Azure inventory source vars
-      ansible.builtin.debug:
-        msg:
-          name: "{{ item.name }}"
-          source_vars: "{{ item.source_vars }}"
-      loop: "{{ azure_inventory_sources_result.json.results }}"
-      loop_control:
-        label: "{{ item.name }}"
+    - name: Initialize matched Azure inventory sources
+      ansible.builtin.set_fact:
+        matched_azure_inventory_sources: []
+      when:
+        - azure_subscription_id is defined
 
     - name: Match Azure inventory source by aap_subscription_id
       ansible.builtin.set_fact:
         matched_azure_inventory_sources: >-
           {{
-            azure_inventory_sources_result.json.results
-            | selectattr(
-                'source_vars',
-                'search',
-                'aap_subscription_id: ' ~ azure_subscription_id
-              )
-            | list
+            matched_azure_inventory_sources + [item]
           }}
+      loop: "{{ azure_inventory_sources_result.json.results }}"
+      loop_control:
+        label: "{{ item.name }}"
       when:
-        - azure_subscription_id is defined
-        - azure_inventory_sources_result.json.results is defined
+          - azure_subscription_id is defined
+          - item.source_vars is defined
+          - item.source_vars.aap_subscription_id is defined
+          - >
+            (item.source_vars.aap_subscription_id | string | lower)
+            ==
+            (azure_subscription_id | string | lower)
 
     - name: Show extracted Azure subscription ID
       ansible.builtin.debug:
