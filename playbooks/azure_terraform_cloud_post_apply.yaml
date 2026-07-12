@@ -1,0 +1,207 @@
+---
+- name: Process Terraform post-apply and launch Azure bootstrap workflows
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    controller_host: "{{ lookup('ansible.builtin.env', 'CONTROLLER_HOST') | trim }}"
+    controller_username: "{{ lookup('ansible.builtin.env', 'CONTROLLER_USERNAME') | trim }}"
+    controller_password: "{{ lookup('ansible.builtin.env', 'CONTROLLER_PASSWORD') | trim }}"
+
+  tasks:
+    - name: Get JSON plan information by run ID
+      hashicorp.terraform.view_plan:
+        run_id: "{{ run_id }}"
+        tf_token: "{{ hcpterraform_api_token }}"
+        output_format: json
+      register: planresults
+      until: planresults.json_output.complete
+      retries: 30
+      delay: 10
+      no_log: true
+
+    - name: Initialize VM routing lists
+      ansible.builtin.set_fact:
+        azure_linux_vms: []
+        azure_windows_vms: []
+        matched_azure_inventory_sources: []
+
+    ###########################################################################
+    # Azure discovery and inventory synchronization
+    ###########################################################################
+
+    - name: Find newly created Azure Linux VMs
+      ansible.builtin.set_fact:
+        azure_linux_vms: "{{ azure_linux_vms + [item.change.after.name] }}"
+      loop: "{{ planresults.json_output.resource_changes }}"
+      loop_control:
+        label: "{{ item.address | default(item.type) }}"
+      when:
+        - item.type == "azurerm_linux_virtual_machine"
+        - "'create' in item.change.actions"
+        - item.change.after.name is defined
+
+    - name: Find newly created Azure Windows VMs
+      ansible.builtin.set_fact:
+        azure_windows_vms: "{{ azure_windows_vms + [item.change.after.name] }}"
+      loop: "{{ planresults.json_output.resource_changes }}"
+      loop_control:
+        label: "{{ item.address | default(item.type) }}"
+      when:
+        - item.type == "azurerm_windows_virtual_machine"
+        - "'create' in item.change.actions"
+        - item.change.after.name is defined
+
+    - name: Extract Azure subscription ID from Azure resource IDs
+      ansible.builtin.set_fact:
+        azure_subscription_id: >-
+          {{
+            (
+              planresults.json_output.resource_changes
+              | selectattr(
+                  'provider_name',
+                  'equalto',
+                  'registry.terraform.io/hashicorp/azurerm'
+                )
+              | map(attribute='change.after')
+              | map('to_json')
+              | join(' ')
+              | regex_search(
+                  '/subscriptions/([0-9a-fA-F-]{36})',
+                  '\1'
+                )
+            ) | first
+          }}
+      when:
+        - (azure_linux_vms | length > 0) or
+          (azure_windows_vms | length > 0)
+
+    - name: Get Azure inventory sources from controller
+      ansible.builtin.uri:
+        url: "{{ controller_host }}/api/controller/v2/inventory_sources/?source=azure_rm&page_size=200"
+        method: GET
+        user: "{{ controller_username }}"
+        password: "{{ controller_password }}"
+        force_basic_auth: true
+        validate_certs: false
+        return_content: true
+        status_code: 200
+      register: azure_inventory_sources_result
+      no_log: true
+      when:
+        - azure_subscription_id is defined
+
+    - name: Initialize matched Azure inventory sources
+      ansible.builtin.set_fact:
+        matched_azure_inventory_sources: []
+      when:
+        - azure_subscription_id is defined
+
+    - name: Match Azure inventory source by aap_subscription_id
+      ansible.builtin.set_fact:
+        matched_azure_inventory_sources: >-
+          {{
+            matched_azure_inventory_sources + [item]
+          }}
+      loop: "{{ azure_inventory_sources_result.json.results }}"
+      loop_control:
+        label: "{{ item.name }}"
+      vars:
+        parsed_source_vars: "{{ item.source_vars | default('{}') | from_yaml }}"
+      when:
+          - azure_subscription_id is defined
+          - item.source_vars is defined
+          - parsed_source_vars.aap_subscription_id is defined
+          - >
+            (parsed_source_vars.aap_subscription_id | string | lower)
+            ==
+            (azure_subscription_id | string | lower)
+
+    - name: Show extracted Azure subscription ID
+      ansible.builtin.debug:
+        var: azure_subscription_id
+      when:
+        - azure_subscription_id is defined
+
+    - name: Show matched Azure inventory source names
+      ansible.builtin.debug:
+        msg: >-
+          {{
+            matched_azure_inventory_sources
+            | map(attribute='name')
+            | list
+          }}
+      when:
+        - azure_subscription_id is defined
+
+    - name: Fail if no matching Azure inventory source was found
+      ansible.builtin.fail:
+        msg: >-
+          No Azure inventory source found with
+          aap_subscription_id={{ azure_subscription_id }}.
+          Add aap_subscription_id to the matching Azure inventory
+          source variables.
+      when:
+        - azure_subscription_id is defined
+        - matched_azure_inventory_sources | length == 0
+
+    - name: Sync matching Azure inventory source before bootstrap
+      ansible.controller.inventory_source_update:
+        name: "{{ item.name }}"
+        inventory: "{{ item.summary_fields.inventory.name }}"
+        organization: "{{ item.summary_fields.organization.name }}"
+        wait: true
+        request_timeout: 30
+      loop: "{{ matched_azure_inventory_sources }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when:
+        - matched_azure_inventory_sources | length > 0
+
+    ###########################################################################
+    # Results
+    ###########################################################################
+
+    - name: Show routing results
+      ansible.builtin.debug:
+        msg:
+          azure_subscription_id: >-
+            {{ azure_subscription_id | default('N/A') }}
+          matched_azure_inventory_sources: >-
+            {{
+              matched_azure_inventory_sources
+              | map(attribute='name')
+              | list
+            }}
+          azure_linux_vms: "{{ azure_linux_vms }}"
+          azure_windows_vms: "{{ azure_windows_vms }}"
+
+    ###########################################################################
+    # Bootstrap launches
+    ###########################################################################
+
+    - name: Launch Azure Linux bootstrap workflow
+      ansible.controller.workflow_launch:
+        workflow_template: "Linux-bootstrap-azure"
+        limit: "{{ azure_linux_vms | join(',') }}"
+        extra_vars:
+          vm_name: "{{ azure_linux_vms | join(',') }}"
+          cloud_provider: "azure"
+          operating_system: "linux"
+        wait: true
+        request_timeout: 30
+      when:
+        - azure_linux_vms | length > 0
+
+    - name: Launch Azure Windows bootstrap workflow
+      ansible.controller.workflow_launch:
+        workflow_template: "Windows-bootstrap-azure"
+        limit: "{{ azure_windows_vms | join(',') }}"
+        extra_vars:
+          vm_name: "{{ azure_windows_vms | join(',') }}"
+          cloud_provider: "azure"
+          operating_system: "windows"
+        wait: true
+        request_timeout: 30
+      when:
+        - azure_windows_vms | length > 0
