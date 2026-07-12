@@ -1,0 +1,504 @@
+---
+- name: Process Terraform post-apply and launch AWS bootstrap workflows
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    controller_host: "{{ lookup('ansible.builtin.env', 'CONTROLLER_HOST') | trim }}"
+    controller_username: "{{ lookup('ansible.builtin.env', 'CONTROLLER_USERNAME') | trim }}"
+    controller_password: "{{ lookup('ansible.builtin.env', 'CONTROLLER_PASSWORD') | trim }}"
+
+  tasks:
+    - name: Get JSON plan information by run ID
+      hashicorp.terraform.view_plan:
+        run_id: "{{ run_id }}"
+        tf_token: "{{ hcpterraform_api_token }}"
+        output_format: json
+      register: planresults
+      until: planresults.json_output.complete
+      retries: 30
+      delay: 10
+      no_log: true
+
+    - name: Initialize VM routing lists
+      ansible.builtin.set_fact:
+        aws_instances: []
+        aws_instance_names: []
+        aws_linux_instances: []
+        aws_windows_instances: []
+        aws_linux_instance_mappings: []
+        aws_linux_credential_groups: []
+        matched_aws_inventory_sources: []
+
+    - name: Set AWS region from Terraform outputs
+      ansible.builtin.set_fact:
+        aws_region: >-
+          {{
+            planresults.json_output.planned_values.outputs.aws_region.value
+          }}
+      when:
+        - planresults.json_output.planned_values.outputs.aws_region is defined
+
+    - name: Set fallback AWS SSH key name from Terraform variables
+      ansible.builtin.set_fact:
+        terraform_aws_ssh_key_name: >-
+          {{
+            planresults.json_output.variables.vm.value.ssh_key_name
+          }}
+      when:
+        - planresults.json_output.variables is defined
+        - planresults.json_output.variables.vm is defined
+        - planresults.json_output.variables.vm.value is defined
+        - planresults.json_output.variables.vm.value.ssh_key_name is defined
+        - planresults.json_output.variables.vm.value.ssh_key_name is not none
+        - planresults.json_output.variables.vm.value.ssh_key_name | string | trim | length > 0
+
+    ###########################################################################
+    # AWS discovery
+    ###########################################################################
+
+    - name: Find newly created AWS instances and SSH key names
+      ansible.builtin.set_fact:
+        aws_instances: >-
+          {{
+            aws_instances
+            +
+            [
+              {
+                'name': item.change.after.tags.Name,
+                'ssh_key_name': (
+                  item.change.after.key_name
+                  | default(
+                      terraform_aws_ssh_key_name | default(''),
+                      true
+                    )
+                )
+              }
+            ]
+          }}
+      loop: "{{ planresults.json_output.resource_changes }}"
+      loop_control:
+        label: "{{ item.address | default(item.type) }}"
+      when:
+        - item.type == "aws_instance"
+        - "'create' in item.change.actions"
+        - item.change.after.tags is defined
+        - item.change.after.tags.Name is defined
+
+    - name: Find newly created AWS instances without an SSH key
+      ansible.builtin.set_fact:
+        aws_instances_without_key: >-
+          {{
+            (aws_instances_without_key | default([]))
+            +
+            [item.name]
+          }}
+      loop: "{{ aws_instances }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when:
+        - item.ssh_key_name is not defined or
+          item.ssh_key_name is none or
+          item.ssh_key_name | string | trim | length == 0
+
+    - name: Fail if a newly created AWS instance has no SSH key
+      ansible.builtin.fail:
+        msg: >-
+          The following newly created AWS instances do not have an SSH
+          key name in the Terraform plan:
+          {{ aws_instances_without_key | join(', ') }}.
+
+          The Terraform aws_instance key_name or vm.ssh_key_name value
+          is required to select the matching AAP Machine credential.
+      when:
+        - aws_instances_without_key | default([]) | length > 0
+
+    - name: Set AWS instance name list
+      ansible.builtin.set_fact:
+        aws_instance_names: >-
+          {{
+            aws_instances
+            | map(attribute='name')
+            | unique
+            | list
+          }}
+
+    - name: Find AWS account ID candidates from Terraform plan
+      ansible.builtin.set_fact:
+        aws_account_id_candidates: >-
+          {{
+            (
+              planresults.json_output
+              | to_json
+              | regex_findall(
+                  'arn:aws[a-zA-Z-]*:iam::([0-9]{12}):role/'
+                )
+            )
+            +
+            (
+              planresults.json_output
+              | to_json
+              | regex_findall(
+                  'arn:aws[a-zA-Z-]*:ec2:[^:]+:([0-9]{12}):instance/'
+                )
+            )
+          }}
+      when:
+        - aws_instance_names | length > 0
+
+    - name: Set AWS account ID from Terraform plan
+      ansible.builtin.set_fact:
+        aws_account_id: >-
+          {{
+            aws_account_id_candidates
+            | unique
+            | first
+          }}
+      when:
+        - aws_instance_names | length > 0
+        - aws_account_id_candidates is defined
+        - aws_account_id_candidates | length > 0
+
+    - name: Fail if AWS account ID could not be determined
+      ansible.builtin.fail:
+        msg: >-
+          AWS instances were created, but the AWS account ID could not
+          be extracted from Terraform plan output. Expected an IAM role
+          ARN such as arn:aws:iam::123456789012:role/name or an EC2 ARN.
+      when:
+        - aws_instance_names | length > 0
+        - aws_account_id is not defined
+
+    ###########################################################################
+    # AWS inventory synchronization
+    ###########################################################################
+
+    - name: Get AWS inventory sources from controller
+      ansible.builtin.uri:
+        url: "{{ controller_host }}/api/controller/v2/inventory_sources/?source=ec2&page_size=200"
+        method: GET
+        user: "{{ controller_username }}"
+        password: "{{ controller_password }}"
+        force_basic_auth: true
+        validate_certs: false
+        return_content: true
+        status_code: 200
+      register: aws_inventory_sources_result
+      no_log: true
+      when:
+        - aws_instance_names | length > 0
+        - aws_account_id is defined
+
+    - name: Match AWS inventory source by AWS account ID in source vars
+      ansible.builtin.set_fact:
+        matched_aws_inventory_sources: >-
+          {{
+            aws_inventory_sources_result.json.results
+            | selectattr(
+                'source_vars',
+                'search',
+                aws_account_id
+              )
+            | list
+          }}
+      when:
+        - aws_instance_names | length > 0
+        - aws_account_id is defined
+        - aws_inventory_sources_result.json.results is defined
+
+    - name: Show extracted AWS account ID
+      ansible.builtin.debug:
+        var: aws_account_id
+      when:
+        - aws_instance_names | length > 0
+        - aws_account_id is defined
+
+    - name: Show matched AWS inventory source names
+      ansible.builtin.debug:
+        msg: >-
+          {{
+            matched_aws_inventory_sources
+            | map(attribute='name')
+            | list
+          }}
+      when:
+        - aws_instance_names | length > 0
+
+    - name: Fail if no matching AWS inventory source was found
+      ansible.builtin.fail:
+        msg: >-
+          No AWS inventory source found with AWS account ID
+          {{ aws_account_id }} in source_vars.
+      when:
+        - aws_instance_names | length > 0
+        - aws_account_id is defined
+        - matched_aws_inventory_sources | length == 0
+
+    - name: Sync matching AWS inventory source before bootstrap
+      ansible.controller.inventory_source_update:
+        name: "{{ item.name }}"
+        inventory: "{{ item.summary_fields.inventory.name }}"
+        organization: "{{ item.summary_fields.organization.name }}"
+        wait: true
+        request_timeout: 30
+      loop: "{{ matched_aws_inventory_sources }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when:
+        - matched_aws_inventory_sources | length > 0
+
+    ###########################################################################
+    # AWS metadata lookup and operating-system routing
+    ###########################################################################
+
+    - name: Set AWS inventory assume role ARN
+      ansible.builtin.set_fact:
+        aws_assume_role_arn: >-
+          {{
+            (
+              matched_aws_inventory_sources[0].source_vars
+              | from_yaml
+            ).iam_role_arn
+          }}
+      when:
+        - matched_aws_inventory_sources | length > 0
+        - aws_account_id is defined
+
+    - name: Show AWS assume role ARN
+      ansible.builtin.debug:
+        var: aws_assume_role_arn
+      when:
+        - aws_assume_role_arn is defined
+
+    - name: Assume AWS inventory role for metadata lookup
+      amazon.aws.sts_assume_role:
+        role_arn: "{{ aws_assume_role_arn }}"
+        role_session_name: "aap-terraform-post-apply"
+      register: aws_assumed_role
+      when:
+        - aws_instance_names | length > 0
+        - aws_assume_role_arn is defined
+
+    - name: Gather AWS instance metadata
+      amazon.aws.ec2_instance_info:
+        region: "{{ aws_region }}"
+        access_key: "{{ aws_assumed_role.sts_creds.access_key }}"
+        secret_key: "{{ aws_assumed_role.sts_creds.secret_key }}"
+        session_token: "{{ aws_assumed_role.sts_creds.session_token }}"
+        filters:
+          "tag:Name": "{{ item }}"
+          instance-state-name:
+            - pending
+            - running
+      loop: "{{ aws_instance_names }}"
+      loop_control:
+        label: "{{ item }}"
+      register: aws_instance_info
+      when:
+        - aws_instance_names | length > 0
+        - aws_region is defined
+        - aws_assumed_role.sts_creds is defined
+
+    - name: Fail if AWS instance metadata was not found
+      ansible.builtin.assert:
+        that:
+          - item.instances is defined
+          - item.instances | length == 1
+        fail_msg: >-
+          Expected exactly one AWS instance named {{ item.item }} in
+          {{ aws_region }}, but found
+          {{ item.instances | default([]) | length }}.
+      loop: "{{ aws_instance_info.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item }}"
+      when:
+        - not (item.skipped | default(false))
+
+    - name: Route AWS Windows instances
+      ansible.builtin.set_fact:
+        aws_windows_instances: >-
+          {{
+            aws_windows_instances + [item.item]
+          }}
+      loop: "{{ aws_instance_info.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item }}"
+      when:
+        - item.instances is defined
+        - item.instances | length == 1
+        - >-
+          'windows' in
+          (
+            item.instances[0].platform_details
+            | default('')
+            | lower
+          )
+
+    - name: Route AWS Linux instances
+      ansible.builtin.set_fact:
+        aws_linux_instances: >-
+          {{
+            aws_linux_instances + [item.item]
+          }}
+      loop: "{{ aws_instance_info.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item }}"
+      when:
+        - item.instances is defined
+        - item.instances | length == 1
+        - >-
+          'windows' not in
+          (
+            item.instances[0].platform_details
+            | default('')
+            | lower
+          )
+
+    ###########################################################################
+    # AWS Linux Machine credential selection
+    ###########################################################################
+
+    - name: Build AWS Linux instance-to-key mappings
+      ansible.builtin.set_fact:
+        aws_linux_instance_mappings: >-
+          {{
+            aws_linux_instance_mappings
+            +
+            [
+              {
+                'name': item,
+                'ssh_key_name': (
+                  aws_instances
+                  | selectattr('name', 'equalto', item)
+                  | map(attribute='ssh_key_name')
+                  | first
+                )
+              }
+            ]
+          }}
+      loop: "{{ aws_linux_instances }}"
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Get AAP Machine credentials
+      ansible.builtin.uri:
+        url: "{{ controller_host }}/api/controller/v2/credentials/?credential_type__kind=ssh&page_size=200"
+        method: GET
+        user: "{{ controller_username }}"
+        password: "{{ controller_password }}"
+        force_basic_auth: true
+        validate_certs: false
+        return_content: true
+        status_code: 200
+      register: aws_machine_credentials_result
+      no_log: true
+      when:
+        - aws_linux_instance_mappings | length > 0
+
+    - name: Validate AAP Machine credential for each AWS SSH key
+      ansible.builtin.assert:
+        that:
+          - >-
+            aws_machine_credentials_result.json.results
+            | selectattr('name', 'equalto', item)
+            | list
+            | length == 1
+        fail_msg: >-
+          Expected exactly one AAP Machine credential named {{ item }}.
+          The AAP credential name must exactly match the EC2 key pair
+          name supplied by Terraform.
+        success_msg: >-
+          Matched AWS key pair {{ item }} to its AAP Machine credential.
+      loop: >-
+        {{
+          aws_linux_instance_mappings
+          | map(attribute='ssh_key_name')
+          | unique
+          | list
+        }}
+      loop_control:
+        label: "{{ item }}"
+      when:
+        - aws_linux_instance_mappings | length > 0
+
+    - name: Build AWS Linux credential groups
+      ansible.builtin.set_fact:
+        aws_linux_credential_groups: >-
+          {{
+            aws_linux_credential_groups
+            +
+            [
+              {
+                'ssh_key_name': item,
+                'hosts': (
+                  aws_linux_instance_mappings
+                  | selectattr('ssh_key_name', 'equalto', item)
+                  | map(attribute='name')
+                  | list
+                )
+              }
+            ]
+          }}
+      loop: >-
+        {{
+          aws_linux_instance_mappings
+          | map(attribute='ssh_key_name')
+          | unique
+          | list
+        }}
+      loop_control:
+        label: "{{ item }}"
+      when:
+        - aws_linux_instance_mappings | length > 0
+
+    ###########################################################################
+    # Results
+    ###########################################################################
+
+    - name: Show routing results
+      ansible.builtin.debug:
+        msg:
+          aws_account_id: "{{ aws_account_id | default('N/A') }}"
+          matched_aws_inventory_sources: >-
+            {{
+              matched_aws_inventory_sources
+              | map(attribute='name')
+              | list
+            }}
+          aws_assume_role_arn: >-
+            {{ aws_assume_role_arn | default('N/A') }}
+          aws_linux_instances: "{{ aws_linux_instances }}"
+          aws_windows_instances: "{{ aws_windows_instances }}"
+          aws_linux_instance_mappings: "{{ aws_linux_instance_mappings }}"
+          aws_linux_credential_groups: "{{ aws_linux_credential_groups }}"
+
+    ###########################################################################
+    # Bootstrap launches
+    ###########################################################################
+
+    - name: Launch AWS Linux bootstrap dispatcher by SSH key
+      ansible.controller.job_launch:
+        job_template: "Linux-bootstrap-aws-dispatcher"
+        extra_vars:
+          aws_bootstrap_hosts: "{{ item.hosts }}"
+          aws_machine_credential_name: "{{ item.ssh_key_name }}"
+        wait: true
+        request_timeout: 30
+      loop: "{{ aws_linux_credential_groups }}"
+      loop_control:
+        label: "{{ item.ssh_key_name }} -> {{ item.hosts | join(',') }}"
+      when:
+        - aws_linux_credential_groups | length > 0
+
+    - name: Launch AWS Windows bootstrap workflow
+      ansible.controller.workflow_launch:
+        workflow_template: "Windows-bootstrap-aws"
+        limit: "{{ aws_windows_instances | join(',') }}"
+        extra_vars:
+          vm_name: "{{ aws_windows_instances | join(',') }}"
+          cloud_provider: "aws"
+          operating_system: "windows"
+        wait: true
+        request_timeout: 30
+      when:
+        - aws_windows_instances | length > 0
